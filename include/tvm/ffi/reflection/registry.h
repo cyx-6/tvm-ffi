@@ -152,12 +152,41 @@ class DefaultValue : public InfoTrait {
    * \param info The field info.
    */
   TVM_FFI_INLINE void Apply(TVMFFIFieldInfo* info) const {
-    info->default_value = AnyView(value_).CopyToTVMFFIAny();
+    info->default_value_or_factory = AnyView(value_).CopyToTVMFFIAny();
     info->flags |= kTVMFFIFieldFlagBitMaskHasDefault;
   }
 
  private:
   Any value_;
+};
+
+/*!
+ * \brief Trait that can be used to set field default factory.
+ *
+ * A default factory is a callable () -> Any that is invoked each time
+ * a default value is needed, producing a fresh value. This is important
+ * for mutable defaults (e.g., Array, Map) to avoid aliasing.
+ */
+class DefaultFactory : public InfoTrait {
+ public:
+  /*!
+   * \brief Constructor
+   * \param factory The factory function to be called to produce default values.
+   */
+  explicit DefaultFactory(Function factory) : factory_(std::move(factory)) {}
+
+  /*!
+   * \brief Apply the default factory to the field info
+   * \param info The field info.
+   */
+  TVM_FFI_INLINE void Apply(TVMFFIFieldInfo* info) const {
+    info->default_value_or_factory = AnyView(factory_).CopyToTVMFFIAny();
+    info->flags |= kTVMFFIFieldFlagBitMaskHasDefault;
+    info->flags |= kTVMFFIFieldFlagBitMaskDefaultFromFactory;
+  }
+
+ private:
+  Function factory_;
 };
 
 /*!
@@ -192,6 +221,33 @@ class AttachFieldFlag : public InfoTrait {
 
  private:
   int32_t flag_;
+};
+
+/*!
+ * \brief Trait that controls whether a field appears in repr output.
+ *
+ * By default, all fields appear in repr. Use `Repr(false)` to exclude a field.
+ */
+class Repr : public InfoTrait {
+ public:
+  /*!
+   * \brief Constructor.
+   * \param show Whether the field should appear in repr output.
+   */
+  explicit Repr(bool show) : show_(show) {}
+
+  /*!
+   * \brief Apply the repr flag to the field info.
+   * \param info The field info.
+   */
+  TVM_FFI_INLINE void Apply(TVMFFIFieldInfo* info) const {
+    if (!show_) {
+      info->flags |= kTVMFFIFieldFlagBitMaskReprOff;
+    }
+  }
+
+ private:
+  bool show_;
 };
 
 /*!
@@ -460,6 +516,13 @@ struct init {
   }
 };
 
+/*! \brief Well-known type attribute names used by the reflection system. */
+namespace type_attr {
+inline constexpr const char* kInit = "__ffi_init__";
+inline constexpr const char* kShallowCopy = "__ffi_shallow_copy__";
+inline constexpr const char* kRepr = "__ffi_repr__";
+}  // namespace type_attr
+
 /*!
  * \brief Helper to register Object's reflection metadata.
  * \tparam Class The class type.
@@ -481,6 +544,7 @@ class ObjectDef : public ReflectionDefBase {
   explicit ObjectDef(ExtraArgs&&... extra_args)
       : type_index_(Class::_GetOrAllocRuntimeTypeIndex()), type_key_(Class::_type_key) {
     RegisterExtraInfo(std::forward<ExtraArgs>(extra_args)...);
+    AutoRegisterCopy();
   }
 
   /*!
@@ -591,6 +655,25 @@ class ObjectDef : public ReflectionDefBase {
   template <typename T>
   friend class OverloadObjectDef;
 
+  /*! \brief Shallow-copy \p self via the C++ copy constructor. */
+  static ObjectRef ShallowCopy(const Class* self) {
+    return ObjectRef(ffi::make_object<Class>(*self));
+  }
+
+  void AutoRegisterCopy() {
+    if constexpr (std::is_copy_constructible_v<Class>) {
+      // Register __ffi_shallow_copy__ as an instance method
+      RegisterMethod(type_attr::kShallowCopy, false, &ObjectDef::ShallowCopy);
+      // Also register as a type attribute for generic deep copy lookup
+      Function copy_fn = GetMethod(std::string(type_key_) + "." + type_attr::kShallowCopy,
+                                   &ObjectDef::ShallowCopy);
+      TVMFFIByteArray attr_name = {type_attr::kShallowCopy,
+                                   std::char_traits<char>::length(type_attr::kShallowCopy)};
+      TVMFFIAny attr_value = AnyView(copy_fn).CopyToTVMFFIAny();
+      TVM_FFI_CHECK_SAFE_CALL(TVMFFITypeRegisterAttr(type_index_, &attr_name, &attr_value));
+    }
+  }
+
   template <typename... ExtraArgs>
   void RegisterExtraInfo(ExtraArgs&&... extra_args) {
     TVMFFITypeMetadata info;
@@ -627,7 +710,7 @@ class ObjectDef : public ReflectionDefBase {
     info.getter = FieldGetter<T>;
     info.setter = FieldSetter<T>;
     // initialize default value to nullptr
-    info.default_value = AnyView(nullptr).CopyToTVMFFIAny();
+    info.default_value_or_factory = AnyView(nullptr).CopyToTVMFFIAny();
     info.doc = TVMFFIByteArray{nullptr, 0};
     info.metadata_.emplace_back("type_schema", details::TypeSchema<T>::v());
     // apply field info traits
@@ -663,7 +746,7 @@ class ObjectDef : public ReflectionDefBase {
 
   int32_t type_index_;
   const char* type_key_;
-  static constexpr const char* kInitMethodName = "__ffi_init__";
+  static constexpr const char* kInitMethodName = type_attr::kInit;
 };
 
 /*!

@@ -55,27 +55,32 @@ def type_info_to_cls(
         attrs[field.name] = field.as_property(cls)
 
     # Step 3. Add methods
-    def _add_method(name: str, func: Callable[..., Any]) -> None:
-        if name == "__ffi_init__":
-            name = "__c_ffi_init__"
-        # Allow overriding methods (including from base classes like Object.__repr__)
-        # by always adding to attrs, which will be used when creating the new class
-        func.__module__ = cls.__module__
-        func.__name__ = name
-        func.__qualname__ = f"{cls.__qualname__}.{name}"
-        func.__doc__ = f"Method `{name}` of class `{cls.__qualname__}`"
-        attrs[name] = func
-
     for name, method_impl in methods.items():
         if method_impl is not None:
-            _add_method(name, method_impl)
+            method_impl.__module__ = cls.__module__
+            method_impl.__name__ = name  # ty: ignore[unresolved-attribute]
+            method_impl.__qualname__ = f"{cls.__qualname__}.{name}"  # ty: ignore[unresolved-attribute]
+            method_impl.__doc__ = f"Method `{name}` of class `{cls.__qualname__}`"
+            attrs[name] = method_impl
     for method in type_info.methods:
-        _add_method(method.name, method.func)
+        name = method.name
+        if name == "__ffi_init__":
+            name = "__c_ffi_init__"
+        # as_callable wraps instance methods so `self` is passed to the C++ function,
+        # and wraps static methods with staticmethod(); it also sets __module__,
+        # __name__, __qualname__, and __doc__ so we insert directly into attrs.
+        func = method.as_callable(cls)
+        if name != method.name:
+            # Rename was applied (e.g. __ffi_init__ -> __c_ffi_init__)
+            inner = func.__func__ if isinstance(func, staticmethod) else func
+            inner.__name__ = name  # ty: ignore[invalid-assignment]
+            inner.__qualname__ = f"{cls.__qualname__}.{name}"  # ty: ignore[invalid-assignment]
+        attrs[name] = func
 
     # Step 4. Create the new class
     new_cls = type(cls.__name__, cls_bases, attrs)
     new_cls.__module__ = cls.__module__
-    new_cls = functools.wraps(cls, updated=())(new_cls)  # type: ignore
+    new_cls = functools.wraps(cls, updated=())(new_cls)
     return cast(Type[_InputClsType], new_cls)
 
 
@@ -120,46 +125,6 @@ def _get_all_fields(type_info: TypeInfo) -> list[TypeField]:
         cur_type_info = cur_type_info.parent_type_info
     fields.reverse()
     return fields
-
-
-def method_repr(type_cls: type, type_info: TypeInfo) -> Callable[..., str]:
-    """Generate a ``__repr__`` method for the dataclass.
-
-    The generated representation includes all fields with ``repr=True`` in
-    the format ``ClassName(field1=value1, field2=value2, ...)``.
-    """
-    # Step 0. Collect all fields from the type hierarchy
-    fields = _get_all_fields(type_info)
-
-    # Step 1. Filter fields that should appear in repr
-    repr_fields: list[str] = []
-    for field in fields:
-        assert field.name is not None
-        assert field.dataclass_field is not None
-        if field.dataclass_field.repr:
-            repr_fields.append(field.name)
-
-    # Step 2. Generate the repr method
-    if not repr_fields:
-        # No fields to show, return a simple class name representation
-        body_lines = [f"return f'{type_cls.__name__}()'"]
-    else:
-        # Build field representations
-        fields_str = ", ".join(
-            f"{field_name}={{self.{field_name}!r}}" for field_name in repr_fields
-        )
-        body_lines = [f"return f'{type_cls.__name__}({fields_str})'"]
-
-    source_lines = ["def __repr__(self) -> str:"]
-    source_lines.extend(f"    {line}" for line in body_lines)
-    source = "\n".join(source_lines)
-
-    # Note: Code generation in this case is guaranteed to be safe,
-    # because the generated code does not contain any untrusted input.
-    namespace: dict[str, Any] = {}
-    exec(source, {}, namespace)
-    __repr__ = namespace["__repr__"]
-    return __repr__
 
 
 def method_init(_type_cls: type, type_info: TypeInfo) -> Callable[..., None]:

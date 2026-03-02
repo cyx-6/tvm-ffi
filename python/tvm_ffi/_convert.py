@@ -25,11 +25,10 @@ from typing import Any
 
 from . import _dtype, container, core
 
-torch: ModuleType | None = None
 try:
-    import torch  # type: ignore[no-redef]
+    import torch
 except ImportError:
-    pass
+    torch = None  # ty: ignore[invalid-assignment]
 
 numpy: ModuleType | None = None
 try:

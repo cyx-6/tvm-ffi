@@ -110,10 +110,14 @@ struct StaticTypeKey {
   static constexpr const char* kTVMFFIFunction = "ffi.Function";
   /*! \brief The type key for Array */
   static constexpr const char* kTVMFFIArray = "ffi.Array";
+  /*! \brief The type key for List */
+  static constexpr const char* kTVMFFIList = "ffi.List";
   /*! \brief The type key for Map */
   static constexpr const char* kTVMFFIMap = "ffi.Map";
   /*! \brief The type key for Module */
   static constexpr const char* kTVMFFIModule = "ffi.Module";
+  /*! \brief The type key for Dict */
+  static constexpr const char* kTVMFFIDict = "ffi.Dict";
   /*! \brief The type key for OpaquePyObject */
   static constexpr const char* kTVMFFIOpaquePyObject = "ffi.OpaquePyObject";
 };
@@ -1092,11 +1096,20 @@ struct ObjectUnsafe {
     return const_cast<TVMFFIObject*>(&(src->header_));
   }
 
+// Suppress -Winvalid-offsetof: we intentionally use offsetof on non-standard-layout types
+// to avoid undefined behavior from null pointer arithmetic that sanitizers flag.
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
   template <typename Class>
   TVM_FFI_INLINE static int64_t GetObjectOffsetToSubclass() {
-    return (reinterpret_cast<int64_t>(&(static_cast<Class*>(nullptr)->header_)) -
-            reinterpret_cast<int64_t>(&(static_cast<Object*>(nullptr)->header_)));
+    return static_cast<int64_t>(__builtin_offsetof(Class, header_)) -
+           static_cast<int64_t>(__builtin_offsetof(Object, header_));
   }
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
   template <typename T>
   TVM_FFI_INLINE static T ObjectRefFromObjectPtr(const ObjectPtr<Object>& ptr) {

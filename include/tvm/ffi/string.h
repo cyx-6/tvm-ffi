@@ -385,7 +385,9 @@ class Bytes {
   }
   void InitData(const char* data, size_t size) {
     char* dest_data = InitSpaceForSize(size);
-    std::memcpy(dest_data, data, size);
+    if (size > 0) {
+      std::memcpy(dest_data, data, size);
+    }
     // mainly to be compat with string
     dest_data[size] = '\0';
   }
@@ -754,7 +756,9 @@ class String {
   }
   void InitData(const char* data, size_t size) {
     char* dest_data = InitSpaceForSize(size);
-    std::memcpy(dest_data, data, size);
+    if (size > 0) {
+      std::memcpy(dest_data, data, size);
+    }
     dest_data[size] = '\0';
   }
   /*!
@@ -776,6 +780,7 @@ class String {
 #if (__GNUC__) && !(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstringop-overflow"
+#pragma GCC diagnostic ignored "-Warray-bounds"
 #pragma GCC diagnostic ignored "-Wrestrict"
 #endif
     char* dest_data = ret.InitSpaceForSize(lhs_size + rhs_size);

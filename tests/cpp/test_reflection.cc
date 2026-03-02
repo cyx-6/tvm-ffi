@@ -18,6 +18,7 @@
  * under the License.
  */
 #include <gtest/gtest.h>
+#include <tvm/ffi/container/array.h>
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/object.h>
 #include <tvm/ffi/reflection/access_path.h>
@@ -61,6 +62,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   TVarObj::RegisterReflection();
   TFuncObj::RegisterReflection();
   TCustomFuncObj::RegisterReflection();
+  TAllFieldsObj::RegisterReflection();
+  TWithDefaultsObj::RegisterReflection();
 
   refl::ObjectDef<TestObjA>()
       .def(refl::init<int64_t, int64_t>())
@@ -101,13 +104,14 @@ TEST(Reflection, FieldInfo) {
   EXPECT_EQ(Bytes(info_int->doc).operator std::string(), "");
 
   const TVMFFIFieldInfo* info_float = reflection::GetFieldInfo("test.Float", "value");
-  EXPECT_EQ(info_float->default_value.v_float64, 10.0);
+  EXPECT_EQ(info_float->default_value_or_factory.v_float64, 10.0);
   EXPECT_TRUE(info_float->flags & kTVMFFIFieldFlagBitMaskHasDefault);
   EXPECT_FALSE(info_float->flags & kTVMFFIFieldFlagBitMaskWritable);
   EXPECT_EQ(Bytes(info_float->doc).operator std::string(), "float value field");
 
   const TVMFFIFieldInfo* info_prim_expr_dtype = reflection::GetFieldInfo("test.PrimExpr", "dtype");
-  AnyView default_value = AnyView::CopyFromTVMFFIAny(info_prim_expr_dtype->default_value);
+  AnyView default_value =
+      AnyView::CopyFromTVMFFIAny(info_prim_expr_dtype->default_value_or_factory);
   EXPECT_EQ(default_value.cast<String>(), "float");
   EXPECT_TRUE(info_prim_expr_dtype->flags & kTVMFFIFieldFlagBitMaskHasDefault);
   EXPECT_TRUE(info_prim_expr_dtype->flags & kTVMFFIFieldFlagBitMaskWritable);
@@ -172,6 +176,24 @@ TEST(Reflection, ForEachFieldInfo) {
 
 TEST(Reflection, TypeAttrColumn) {
   reflection::TypeAttrColumn size_attr("test.size");
+  EXPECT_EQ(size_attr[TIntObj::RuntimeTypeIndex()].cast<int>(), sizeof(TIntObj));
+}
+
+TEST(Reflection, TypeAttrColumnBeginIndex) {
+  // Get the column and verify begin_index
+  TVMFFIByteArray attr_name = {"test.size", std::char_traits<char>::length("test.size")};
+  const TVMFFITypeAttrColumn* column = TVMFFIGetTypeAttrColumn(&attr_name);
+  ASSERT_NE(column, nullptr);
+  // begin_index should be >= 0
+  EXPECT_GE(column->begin_index, 0);
+  // size should cover the range from begin_index
+  EXPECT_GT(column->size, 0);
+  // verify that lookup of a type_index below begin_index returns None
+  reflection::TypeAttrColumn size_attr("test.size");
+  AnyView result = size_attr[0];  // index 0 is kTVMFFINone, unlikely to have this attr
+  (void)result;  // suppress unused variable warning; we only verify no crash occurs
+  // The result may or may not be None depending on begin_index; the key is no crash.
+  // verify the known registered entry still works
   EXPECT_EQ(size_attr[TIntObj::RuntimeTypeIndex()].cast<int>(), sizeof(TIntObj));
 }
 
@@ -295,6 +317,25 @@ TEST(Reflection, AccessPath) {
   EXPECT_FALSE(root_parent.has_value());
 }
 
+struct TestObjWithFactory : public Object {
+  Array<ObjectRef> items;
+  int64_t count;
+
+  explicit TestObjWithFactory(UnsafeInit) {}
+
+  [[maybe_unused]] static constexpr bool _type_mutable = true;
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("test.TestObjWithFactory", TestObjWithFactory, Object);
+};
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::ObjectDef<TestObjWithFactory>()
+      .def_ro("items", &TestObjWithFactory::items,
+              refl::DefaultFactory(
+                  Function::FromTyped([]() -> Array<ObjectRef> { return Array<ObjectRef>(); })))
+      .def_ro("count", &TestObjWithFactory::count, refl::DefaultValue(static_cast<int64_t>(0)));
+}
+
 struct TestObjWithAny : public Object {
   Any value;
   explicit TestObjWithAny(Any value) : value(std::move(value)) {}
@@ -350,4 +391,51 @@ TEST(Reflection, InitWithAnyView) {
   ASSERT_TRUE(obj3.as<TestObjWithAnyView>() != nullptr);
   EXPECT_EQ(obj3.as<TestObjWithAnyView>()->value.cast<String>(), "hello");
 }
+TEST(Reflection, DefaultFactoryFlag) {
+  const TVMFFIFieldInfo* info_items = reflection::GetFieldInfo("test.TestObjWithFactory", "items");
+  EXPECT_TRUE(info_items->flags & kTVMFFIFieldFlagBitMaskHasDefault);
+  EXPECT_TRUE(info_items->flags & kTVMFFIFieldFlagBitMaskDefaultFromFactory);
+
+  const TVMFFIFieldInfo* info_count = reflection::GetFieldInfo("test.TestObjWithFactory", "count");
+  EXPECT_TRUE(info_count->flags & kTVMFFIFieldFlagBitMaskHasDefault);
+  EXPECT_FALSE(info_count->flags & kTVMFFIFieldFlagBitMaskDefaultFromFactory);
+}
+
+TEST(Reflection, DefaultFactoryCreation) {
+  namespace refl = tvm::ffi::reflection;
+  refl::ObjectCreator creator("test.TestObjWithFactory");
+
+  // Create two objects without providing "items" - each should get a fresh Array
+  Any obj1 = creator(Map<String, Any>({{"count", static_cast<int64_t>(42)}}));
+  Any obj2 = creator(Map<String, Any>({{"count", static_cast<int64_t>(99)}}));
+
+  auto* p1 = obj1.as<TestObjWithFactory>();
+  auto* p2 = obj2.as<TestObjWithFactory>();
+
+  ASSERT_NE(p1, nullptr);
+  ASSERT_NE(p2, nullptr);
+  EXPECT_EQ(p1->count, 42);
+  EXPECT_EQ(p2->count, 99);
+  // Both should have empty arrays
+  EXPECT_EQ(p1->items.size(), 0);
+  EXPECT_EQ(p2->items.size(), 0);
+  // Crucially, the arrays should be distinct objects (not aliased)
+  EXPECT_NE(p1->items.get(), p2->items.get());
+}
+
+TEST(Reflection, DefaultFactoryNotCalledWhenProvided) {
+  namespace refl = tvm::ffi::reflection;
+  refl::ObjectCreator creator("test.TestObjWithFactory");
+
+  Array<ObjectRef> custom_items;
+  custom_items.push_back(TInt(1));
+  Any obj =
+      creator(Map<String, Any>({{"items", custom_items}, {"count", static_cast<int64_t>(5)}}));
+
+  auto* p = obj.as<TestObjWithFactory>();
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(p->items.size(), 1);
+  EXPECT_EQ(p->count, 5);
+}
+
 }  // namespace

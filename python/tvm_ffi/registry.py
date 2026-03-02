@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import sys
 from typing import Any, Callable, Literal, Sequence, TypeVar, overload
@@ -134,9 +135,9 @@ def register_global_func(
     :py:func:`tvm_ffi.remove_global_func`
 
     """
-    if callable(func_name):
+    if not isinstance(func_name, str):
         f = func_name
-        func_name = f.__name__
+        func_name = f.__name__  # ty: ignore[unresolved-attribute]
 
     if not isinstance(func_name, str):
         raise ValueError("expect string function name")
@@ -275,7 +276,8 @@ def get_global_func_metadata(name: str) -> dict[str, Any]:
         Register a Python callable as a global FFI function.
 
     """
-    return json.loads(get_global_func("ffi.GetGlobalFuncMetadata")(name) or "{}")
+    metadata_json = get_global_func("ffi.GetGlobalFuncMetadata")(name)
+    return json.loads(metadata_json) if metadata_json else {}
 
 
 def init_ffi_api(namespace: str, target_module_name: str | None = None) -> None:
@@ -334,23 +336,98 @@ def _add_class_attrs(type_cls: type, type_info: TypeInfo) -> type:
         if not hasattr(type_cls, name):  # skip already defined attributes
             setattr(type_cls, name, field.as_property(type_cls))
     has_c_init = False
+    has_shallow_copy = False
     for method in type_info.methods:
         name = method.name
         if name == "__ffi_init__":
             name = "__c_ffi_init__"
             has_c_init = True
-        if not hasattr(type_cls, name):
+        if name == "__ffi_shallow_copy__":
+            has_shallow_copy = True
+            # Always override: shallow copy is type-specific and must not be inherited
+            setattr(type_cls, name, method.as_callable(type_cls))
+        elif not hasattr(type_cls, name):
             setattr(type_cls, name, method.as_callable(type_cls))
     if "__init__" not in type_cls.__dict__:
         if has_c_init:
             setattr(type_cls, "__init__", getattr(type_cls, "__ffi_init__"))
         elif not issubclass(type_cls, core.PyNativeObject):
             setattr(type_cls, "__init__", __init__invalid)
+    is_container = type_info.type_key in ("ffi.Array", "ffi.Map", "ffi.List", "ffi.Dict")
+    _setup_copy_methods(type_cls, has_shallow_copy, is_container=is_container)
     return type_cls
+
+
+def _setup_copy_methods(
+    type_cls: type, has_shallow_copy: bool, *, is_container: bool = False
+) -> None:
+    """Set up __copy__, __deepcopy__, __replace__ based on copy support."""
+    if has_shallow_copy:
+        if "__copy__" not in type_cls.__dict__:
+            setattr(type_cls, "__copy__", _copy_supported)
+        if "__deepcopy__" not in type_cls.__dict__:
+            setattr(type_cls, "__deepcopy__", _deepcopy_supported)
+        if "__replace__" not in type_cls.__dict__:
+            setattr(type_cls, "__replace__", _replace_supported)
+    else:
+        if "__copy__" not in type_cls.__dict__:
+            setattr(type_cls, "__copy__", _copy_unsupported)
+        if "__deepcopy__" not in type_cls.__dict__:
+            # Containers (Array, Map) support deepcopy via ffi.DeepCopy
+            # even without __ffi_shallow_copy__
+            if is_container:
+                setattr(type_cls, "__deepcopy__", _deepcopy_supported)
+            else:
+                setattr(type_cls, "__deepcopy__", _deepcopy_unsupported)
+        if "__replace__" not in type_cls.__dict__:
+            setattr(type_cls, "__replace__", _replace_unsupported)
 
 
 def __init__invalid(self: Any, *args: Any, **kwargs: Any) -> None:
     raise RuntimeError("The __init__ method of this class is not implemented.")
+
+
+def _copy_supported(self: Any) -> Any:
+    return self.__ffi_shallow_copy__()
+
+
+def _deepcopy_supported(self: Any, memo: Any = None) -> Any:
+    return _get_deep_copy_func()(self)
+
+
+@functools.lru_cache(maxsize=1)
+def _get_deep_copy_func() -> core.Function:
+    return get_global_func("ffi.DeepCopy")
+
+
+def _replace_supported(self: Any, **kwargs: Any) -> Any:
+    import copy  # noqa: PLC0415
+
+    obj = copy.copy(self)
+    for key, value in kwargs.items():
+        setattr(obj, key, value)
+    return obj
+
+
+def _copy_unsupported(self: Any) -> Any:
+    raise TypeError(
+        f"Type `{type(self).__name__}` does not support copy. "
+        f"The underlying C++ type is not copy-constructible."
+    )
+
+
+def _deepcopy_unsupported(self: Any, memo: Any = None) -> Any:
+    raise TypeError(
+        f"Type `{type(self).__name__}` does not support deepcopy. "
+        f"The underlying C++ type is not copy-constructible."
+    )
+
+
+def _replace_unsupported(self: Any, **kwargs: Any) -> Any:
+    raise TypeError(
+        f"Type `{type(self).__name__}` does not support replace. "
+        f"The underlying C++ type is not copy-constructible."
+    )
 
 
 def get_registered_type_keys() -> Sequence[str]:

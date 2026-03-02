@@ -26,7 +26,7 @@
 # 2. Python 3.12
 # 3. torch 2.9.0
 try:
-    import torch  # type: ignore
+    import torch
 except ImportError:
     pass
 
@@ -51,12 +51,19 @@ from ._convert import convert
 from .error import register_error
 from ._tensor import Device, device, DLDeviceType
 from ._tensor import from_dlpack, Tensor, Shape
-from .container import Array, Map
+from .container import Array, Dict, List, Map
 from .module import Module, system_lib, load_module
 from .stream import StreamContext, get_raw_stream, use_raw_stream, use_torch_stream
+from .structural import (
+    StructuralKey,
+    get_first_structural_mismatch,
+    structural_equal,
+    structural_hash,
+)
 from . import serialization
 from . import access_path
 from . import dataclasses
+from . import structural
 from . import cpp
 
 # optional module to speedup dlpack conversion
@@ -86,7 +93,7 @@ from ._dtype import (
 )
 
 try:
-    from ._version import __version__, __version_tuple__  # type: ignore[import-not-found]
+    from ._version import __version__, __version_tuple__
 except ImportError:
     __version__ = "0.0.0.dev0"
     __version_tuple__ = (0, 0, 0, "dev0", "7d34eb8ab.d20250913")
@@ -96,13 +103,16 @@ __all__ = [
     "Array",
     "DLDeviceType",
     "Device",
+    "Dict",
     "Function",
+    "List",
     "Map",
     "Module",
     "Object",
     "ObjectConvertible",
     "Shape",
     "StreamContext",
+    "StructuralKey",
     "Tensor",
     "__version__",
     "__version_tuple__",
@@ -113,6 +123,7 @@ __all__ = [
     "device",
     "dtype",
     "from_dlpack",
+    "get_first_structural_mismatch",
     "get_global_func",
     "get_global_func_metadata",
     "get_raw_stream",
@@ -123,6 +134,9 @@ __all__ = [
     "register_object",
     "remove_global_func",
     "serialization",
+    "structural",
+    "structural_equal",
+    "structural_hash",
     "system_lib",
     "use_raw_stream",
     "use_torch_stream",

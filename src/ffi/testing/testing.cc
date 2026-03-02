@@ -22,6 +22,8 @@
 #include <dlpack/dlpack.h>
 #include <tvm/ffi/any.h>
 #include <tvm/ffi/container/array.h>
+#include <tvm/ffi/container/dict.h>
+#include <tvm/ffi/container/list.h>
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/container/variant.h>
@@ -160,6 +162,26 @@ class TestCxxKwOnly : public Object {
   TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxKwOnly", TestCxxKwOnly, Object);
 };
 
+class TestDeepCopyEdgesObj : public Object {
+ public:
+  Any v_any;
+  ObjectRef v_obj;
+
+  static constexpr bool _type_mutable = true;
+  TVM_FFI_DECLARE_OBJECT_INFO("testing.TestDeepCopyEdges", TestDeepCopyEdgesObj, Object);
+};
+
+class TestNonCopyable : public Object {
+ public:
+  int64_t value;
+
+  explicit TestNonCopyable(int64_t value) : value(value) {}
+  TestNonCopyable(const TestNonCopyable&) = delete;
+  TestNonCopyable& operator=(const TestNonCopyable&) = delete;
+
+  TVM_FFI_DECLARE_OBJECT_INFO("testing.TestNonCopyable", TestNonCopyable, Object);
+};
+
 class TestUnregisteredBaseObject : public Object {
  public:
   int64_t v1;
@@ -218,13 +240,13 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("add_i64", &TestObjectBase::AddI64, "add_i64 method");
 
   refl::ObjectDef<TestObjectDerived>()
-      .def_ro("v_map", &TestObjectDerived::v_map)
-      .def_ro("v_array", &TestObjectDerived::v_array);
+      .def_rw("v_map", &TestObjectDerived::v_map)
+      .def_rw("v_array", &TestObjectDerived::v_array);
 
   refl::ObjectDef<TestCxxClassBase>()
       .def(refl::init<int64_t, int32_t>())
-      .def_rw("v_i64", &TestCxxClassBase::v_i64)
-      .def_rw("v_i32", &TestCxxClassBase::v_i32);
+      .def_rw("v_i64", &TestCxxClassBase::v_i64, refl::Repr(false))
+      .def_rw("v_i32", &TestCxxClassBase::v_i32, refl::Repr(false));
 
   refl::ObjectDef<TestCxxClassDerived>()
       .def(refl::init<int64_t, int32_t, double, float>())
@@ -248,6 +270,14 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def_rw("y", &TestCxxKwOnly::y)
       .def_rw("z", &TestCxxKwOnly::z)
       .def_rw("w", &TestCxxKwOnly::w);
+
+  refl::ObjectDef<TestDeepCopyEdgesObj>()
+      .def_rw("v_any", &TestDeepCopyEdgesObj::v_any)
+      .def_rw("v_obj", &TestDeepCopyEdgesObj::v_obj);
+
+  refl::ObjectDef<TestNonCopyable>()
+      .def(refl::init<int64_t>())
+      .def_ro("value", &TestNonCopyable::value);
 
   refl::ObjectDef<TestUnregisteredBaseObject>()
       .def(refl::init<int64_t>(), "Constructor of TestUnregisteredBaseObject")
@@ -353,6 +383,15 @@ Variant<int64_t, String, Array<int64_t>> schema_variant_mix(
     Variant<int64_t, String, Array<int64_t>> v) {
   return v;
 }
+
+// List types
+List<int64_t> schema_id_list_int(List<int64_t> lst) { return lst; }
+List<String> schema_id_list_str(List<String> lst) { return lst; }
+List<ObjectRef> schema_id_list_obj(List<ObjectRef> lst) { return lst; }
+
+// Dict types
+Dict<String, int64_t> schema_id_dict_str_int(Dict<String, int64_t> d) { return d; }
+Dict<String, String> schema_id_dict_str_str(Dict<String, String> d) { return d; }
 
 // Complex nested types
 Map<String, Array<int64_t>> schema_arr_map_opt(const Array<Optional<int64_t>>& arr,
@@ -516,10 +555,15 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("testing.schema_id_arr_str", schema_test_impl::schema_id_arr_str)
       .def("testing.schema_id_arr_obj", schema_test_impl::schema_id_arr_obj)
       .def("testing.schema_id_arr", schema_test_impl::schema_id_arr)
+      .def("testing.schema_id_list_int", schema_test_impl::schema_id_list_int)
+      .def("testing.schema_id_list_str", schema_test_impl::schema_id_list_str)
+      .def("testing.schema_id_list_obj", schema_test_impl::schema_id_list_obj)
       .def("testing.schema_id_map_str_int", schema_test_impl::schema_id_map_str_int)
       .def("testing.schema_id_map_str_str", schema_test_impl::schema_id_map_str_str)
       .def("testing.schema_id_map_str_obj", schema_test_impl::schema_id_map_str_obj)
       .def("testing.schema_id_map", schema_test_impl::schema_id_map)
+      .def("testing.schema_id_dict_str_int", schema_test_impl::schema_id_dict_str_int)
+      .def("testing.schema_id_dict_str_str", schema_test_impl::schema_id_dict_str_str)
       .def("testing.schema_id_variant_int_str", schema_test_impl::schema_id_variant_int_str)
       .def_packed("testing.schema_packed", [](PackedArgs args, Any* ret) {})
       .def("testing.schema_arr_map_opt", schema_test_impl::schema_arr_map_opt)

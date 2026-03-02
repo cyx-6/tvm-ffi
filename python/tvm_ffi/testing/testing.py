@@ -16,7 +16,7 @@
 # under the License.
 """Testing utilities."""
 
-# ruff: noqa: D102,D105
+# ruff: noqa: D102
 # tvm-ffi-stubgen(begin): import-section
 # fmt: off
 # isort: off
@@ -48,6 +48,7 @@ class TestObjectBase(Object):
     v_f64: float
     v_str: str
     if TYPE_CHECKING:
+        def __ffi_shallow_copy__(self, /) -> Object: ...
         def add_i64(self, _1: int, /) -> int: ...
     # fmt: on
     # tvm-ffi-stubgen(end)
@@ -62,6 +63,7 @@ class TestIntPair(Object):
     a: int
     b: int
     if TYPE_CHECKING:
+        def __ffi_shallow_copy__(self, /) -> Object: ...
         @staticmethod
         def __c_ffi_init__(_0: int, _1: int, /) -> Object: ...
         def sum(self, /) -> int: ...
@@ -77,8 +79,17 @@ class TestObjectDerived(TestObjectBase):
     # fmt: off
     v_map: Mapping[Any, Any]
     v_array: Sequence[Any]
+    if TYPE_CHECKING:
+        def __ffi_shallow_copy__(self, /) -> Object: ...
     # fmt: on
     # tvm-ffi-stubgen(end)
+
+
+@register_object("testing.TestNonCopyable")
+class TestNonCopyable(Object):
+    """Test object with deleted copy constructor."""
+
+    value: int
 
 
 @register_object("testing.SchemaAllTypes")
@@ -102,6 +113,7 @@ class _SchemaAllTypes:
     v_variant: str | Sequence[int] | Mapping[str, int]
     v_opt_arr_variant: Sequence[int | str] | None
     if TYPE_CHECKING:
+        def __ffi_shallow_copy__(self, /) -> Object: ...
         def add_int(self, _1: int, /) -> int: ...
         def append_int(self, _1: Sequence[int], _2: int, /) -> Sequence[int]: ...
         def maybe_concat(self, _1: str | None, _2: str | None, /) -> str | None: ...
@@ -158,7 +170,7 @@ class _TestCxxClassBase:
     not_field_2: ClassVar[int] = 2
 
     def __init__(self, v_i64: int, v_i32: int) -> None:
-        self.__ffi_init__(v_i64 + 1, v_i32 + 2)  # type: ignore[attr-defined]
+        self.__ffi_init__(v_i64 + 1, v_i32 + 2)  # ty: ignore[unresolved-attribute]
 
 
 @c_class("testing.TestCxxClassDerived")
@@ -170,7 +182,7 @@ class _TestCxxClassDerived(_TestCxxClassBase):
 @c_class("testing.TestCxxClassDerivedDerived")
 class _TestCxxClassDerivedDerived(_TestCxxClassDerived):
     v_str: str = field(default_factory=lambda: "default")
-    v_bool: bool  # type: ignore[misc]  # Suppress: Attributes without a default cannot follow attributes with one
+    v_bool: bool  # ty: ignore[dataclass-field-order]  # Required field after fields with defaults
 
 
 @c_class("testing.TestCxxInitSubset")

@@ -22,15 +22,14 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
-torch: ModuleType | None
 try:
-    import torch  # type: ignore[import-not-found,no-redef]
+    import torch
+    import torch.version
 except ImportError:
-    torch = None
+    torch = None  # ty: ignore[invalid-assignment]
 
 import tvm_ffi.cpp
 
