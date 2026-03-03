@@ -28,11 +28,40 @@ from .dylib import DynamicLibrary
 
 
 def _find_orc_rt_library(clang_path: str = "clang") -> str | None:
-    """Find the liborc_rt library using clang -print-runtime-dir.
+    """Find the liborc_rt library.
 
-    If the path returned by clang -print-runtime-dir does not exist,
-    search recursively in the parent directory as a fallback.
+    Search order:
+    1. Bundled library in package's lib/ directory (for self-contained wheel)
+    2. Site-packages lib directory (for editable installs)
+    3. Using clang --print-runtime-dir
+    4. Fallback search in parent directory of clang runtime dir
     """
+    import sys
+
+    # First, check for bundled library in package
+    package_lib_dir = Path(__file__).parent / "lib"
+    if package_lib_dir.exists():
+        for lib_path in package_lib_dir.glob("liborc_rt*.a"):
+            return str(lib_path)
+
+    # Check site-packages lib directory (for editable installs)
+    for site_dir in sys.path:
+        site_lib = Path(site_dir) / "tvm_ffi_orcjit" / "lib"
+        if site_lib.exists():
+            for lib_path in site_lib.glob("liborc_rt*.a"):
+                return str(lib_path)
+
+    # Also check parent lib directory (for editable installs from source)
+    parent_lib_dirs = [
+        Path(__file__).parent.parent.parent / "lib",
+        Path(__file__).parent.parent.parent / "build",
+    ]
+    for lib_dir in parent_lib_dirs:
+        if lib_dir.exists():
+            for lib_path in lib_dir.glob("liborc_rt*.a"):
+                return str(lib_path)
+
+    # Fall back to finding via clang
     try:
         result = subprocess.run(
             [clang_path, "-print-runtime-dir"],
@@ -41,9 +70,6 @@ def _find_orc_rt_library(clang_path: str = "clang") -> str | None:
             check=True,
         )
         runtime_dir = Path(result.stdout.strip())
-        print(runtime_dir)
-        print(list(runtime_dir.glob("liborc_rt*.a")))
-        print(list(runtime_dir.parent.glob("**/liborc_rt*.a")))
 
         if runtime_dir.exists():
             for lib_path in runtime_dir.glob("liborc_rt*.a"):

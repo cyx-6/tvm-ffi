@@ -45,6 +45,10 @@ else:
     _LIB_EXT = "so"
 
 # Load the orcjit extension library
+# Search paths include:
+# 1. Package lib/ directory (for wheel installs with bundled LLVM)
+# 2. Package build/ directory (for local builds)
+# 3. Project-level lib/ and build/ directories (for editable installs)
 _LIB_PATH = [
     Path(__file__).parent / "lib" / f"libtvm_ffi_orcjit.{_LIB_EXT}",
     Path(__file__).parent / "build" / f"libtvm_ffi_orcjit.{_LIB_EXT}",

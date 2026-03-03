@@ -27,6 +27,10 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
   add_compile_options(-mno-outline-atomics)
 endif ()
 
+# Use -fno-use-cxa-atexit to avoid __dso_handle references that cause JIT relocation errors
+# This makes the compiler use atexit() instead of __cxa_atexit()
+add_compile_options(-fno-use-cxa-atexit)
+
 # Run `python -m tvm_ffi.config --cmakedir` to find tvm-ffi package
 find_package(
   Python
