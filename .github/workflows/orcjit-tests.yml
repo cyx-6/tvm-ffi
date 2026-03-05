@@ -56,19 +56,19 @@ jobs:
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          echo "CC=clang-18" >> $GITHUB_ENV
-          echo "CXX=clang++-18" >> $GITHUB_ENV
-          echo "LLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm" >> $GITHUB_ENV
+          sudo ./llvm.sh 19
+          echo "CC=clang-19" >> $GITHUB_ENV
+          echo "CXX=clang++-19" >> $GITHUB_ENV
+          echo "LLVM_DIR=/usr/lib/llvm-19/lib/cmake/llvm" >> $GITHUB_ENV
 
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install llvm@18
-          # Use system clang for compilation to avoid libc++ header conflicts
-          # Only set LLVM_DIR and PATH so CMake can find LLVM libraries
-          echo "LLVM_DIR=$(brew --prefix llvm@18)/lib/cmake/llvm" >> $GITHUB_ENV
-          echo "PATH=$(brew --prefix llvm@18)/bin:$PATH" >> $GITHUB_ENV
+          brew install llvm@19
+          echo "LLVM_DIR=$(brew --prefix llvm@19)/lib/cmake/llvm" >> $GITHUB_ENV
+          echo "CC=$(brew --prefix llvm@19)/bin/clang" >> $GITHUB_ENV
+          echo "CXX=$(brew --prefix llvm@19)/bin/clang++" >> $GITHUB_ENV
+          echo "PATH=$(brew --prefix llvm@19)/bin:$PATH" >> $GITHUB_ENV
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
