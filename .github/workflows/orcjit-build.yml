@@ -49,14 +49,8 @@ jobs:
         run: |
           conda install -y -c conda-forge zlib zstd-static llvmdev=22.1.0 clangdev=22.1.0
           echo "====="
-          which clang
-          clang --version
-          echo "====="
-          which clang++
-          clang++ --version
-          echo "====="
-          which llvm-config
-          llvm-config --version
+          conda info --envs
+          conda list
           echo "====="
           ls /Users/runner/miniconda3/envs/build/
           echo "====="
