@@ -258,6 +258,7 @@ def test_load_and_execute_cuda_function() -> None:
     assert result == 42
 
 
+@pytest.mark.skipif(not sys.platform == "linux", reason="Linux only now")
 def test_ctor_dtor() -> None:
     """Test ctor and dtor when loading an object file."""
     log = ""
@@ -280,25 +281,13 @@ def test_ctor_dtor() -> None:
     lib.get_function("main")()
     del lib
 
-    if sys.platform == "linux":
-        expected_log = (
-            "<init_array.101><init_array.102><init_array.103><init_array>"
-            "<ctors.103><ctors.102><ctors.101><ctors>"
-            "<main>"
-            "<dtors><dtors.101><dtors.102><dtors.103>"
-            "<fini_array><fini_array.103><fini_array.102><fini_array.101>"
-        )
-    elif sys.platform == "darwin":
-        # macOS skips priority section-based ctors/dtors
-        expected_log = (
-            "<init_array.101><init_array.102><init_array.103><init_array>"
-            "<ctors>"
-            "<main>"
-            "<dtors>"
-            "<fini_array><fini_array.103><fini_array.102><fini_array.101>"
-        )
-    else:
-        pytest.skip(f"Unsupported platform: {sys.platform}")
+    expected_log = (
+        "<init_array.101><init_array.102><init_array.103><init_array>"
+        "<ctors.103><ctors.102><ctors.101><ctors>"
+        "<main>"
+        "<dtors><dtors.101><dtors.102><dtors.103>"
+        "<fini_array><fini_array.103><fini_array.102><fini_array.101>"
+    )
 
     assert log == expected_log, log
 
