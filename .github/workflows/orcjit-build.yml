@@ -63,7 +63,7 @@ jobs:
         shell: bash -el {0}
         run: |
           pip install scikit-build-core
-          pip install --no-build-isolation -e .
+          pip install --no-build-isolation --no-deps -e .
 
       - name: Install test dependencies
         shell: bash -el {0}
