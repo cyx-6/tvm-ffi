@@ -69,7 +69,7 @@ Use :cpp:class:`~tvm::ffi::Any` for return values to transfer ownership to the c
 Container Storage
 ~~~~~~~~~~~~~~~~~
 
-:cpp:class:`~tvm::ffi::Any` can be stored in containers like :cpp:class:`~tvm::ffi::Map` and :cpp:class:`~tvm::ffi::Array`:
+:cpp:class:`~tvm::ffi::Any` can be stored in containers like :cpp:class:`~tvm::ffi::Array`, :cpp:class:`~tvm::ffi::List`, :cpp:class:`~tvm::ffi::Map`, and :cpp:class:`~tvm::ffi::Dict` (see :doc:`containers` for details):
 
 .. code-block:: cpp
 
@@ -103,7 +103,8 @@ and :cpp:class:`~tvm::ffi::AnyView`, each with different levels of strictness:
 
 .. dropdown:: Example of :cpp:func:`cast\<T\>() <tvm::ffi::Any::cast>`
 
-  :cpp:func:`cast\<T\>() <tvm::ffi::Any::cast>` is the workhorse. It returns the value or throws:
+  :cpp:func:`cast\<T\>() <tvm::ffi::Any::cast>` is the workhorse. It returns the value or throws
+  a :cpp:class:`tvm::ffi::Error` (see :doc:`exception_handling`):
 
   .. code-block:: cpp
 
@@ -206,7 +207,8 @@ copies 16 bytes with no reference count updates, making it ideal for passing arg
    void process(ffi::AnyView value) {}
 
 :cpp:class:`~tvm::ffi::Any` is an owning container. Copying an :cpp:class:`~tvm::ffi::Any` that holds an object
-increments the reference count; destroying it decrements the count:
+increments the reference count; destroying it decrements the count
+(see :ref:`object-reference-counting` for details on how reference counting works):
 
 .. code-block:: cpp
 
@@ -362,6 +364,10 @@ the :cpp:class:`~tvm::ffi::AnyView` or :cpp:class:`~tvm::ffi::Any`.
 Heap-Allocated Objects
 ~~~~~~~~~~~~~~~~~~~~~~
 
+TVM-FFI objects are heap-allocated, reference-counted containers that inherit from :cpp:class:`tvm::ffi::Object`.
+See :doc:`object_and_class` for details on the object system, and :ref:`object-reference-counting` for
+how reference counting works.
+
 .. list-table:: Figure 3. Common TVM-FFI object types stored as pointers in :cpp:member:`TVMFFIAny::v_obj`.
    :header-rows: 1
    :widths: 40 40 30
@@ -387,9 +393,15 @@ Heap-Allocated Objects
    * - :cpp:class:`ModuleObj* <tvm::ffi::ModuleObj>`
      - :cpp:enumerator:`kTVMFFIModule <TVMFFITypeIndex::kTVMFFIModule>` = 73
      - :cpp:member:`~TVMFFIAny::v_obj`
+   * - :cpp:class:`ListObj* <tvm::ffi::ListObj>`
+     - :cpp:enumerator:`kTVMFFIList <TVMFFITypeIndex::kTVMFFIList>` = 75
+     - :cpp:member:`~TVMFFIAny::v_obj`
+   * - :cpp:class:`DictObj* <tvm::ffi::DictObj>`
+     - :cpp:enumerator:`kTVMFFIDict <TVMFFITypeIndex::kTVMFFIDict>` = 76
+     - :cpp:member:`~TVMFFIAny::v_obj`
 
 
-Heap-allocated objects - :cpp:class:`~tvm::ffi::String`, :cpp:class:`~tvm::ffi::Function`, :cpp:class:`~tvm::ffi::Tensor`, :cpp:class:`~tvm::ffi::Array`, :cpp:class:`~tvm::ffi::Map`, and custom types - are
+Heap-allocated objects - :cpp:class:`~tvm::ffi::String`, :cpp:class:`~tvm::ffi::Function`, :cpp:class:`~tvm::ffi::Tensor`, :cpp:class:`~tvm::ffi::Array`, :cpp:class:`~tvm::ffi::List`, :cpp:class:`~tvm::ffi::Map`, :cpp:class:`~tvm::ffi::Dict`, and custom types - are
 stored as pointers to reference-counted :cpp:class:`TVMFFIObject` headers:
 
 .. code-block:: cpp
@@ -422,4 +434,5 @@ Further Reading
 - :doc:`object_and_class`: How TVM-FFI objects work, including reference counting and type checking
 - :doc:`func_module`: Function calling conventions and the global registry
 - :doc:`tensor`: How tensors flow through :cpp:class:`~tvm::ffi::Any` and :cpp:class:`~tvm::ffi::AnyView`
+- :doc:`exception_handling`: How :cpp:func:`~tvm::ffi::Any::cast` throws exceptions on type mismatch
 - :doc:`abi_overview`: Low-level C ABI details for working with :cpp:class:`TVMFFIAny` directly

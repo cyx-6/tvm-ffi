@@ -22,6 +22,8 @@
 #include <dlpack/dlpack.h>
 #include <tvm/ffi/any.h>
 #include <tvm/ffi/container/array.h>
+#include <tvm/ffi/container/dict.h>
+#include <tvm/ffi/container/list.h>
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/container/variant.h>
@@ -101,10 +103,8 @@ class TestObjectDerived : public TestObjectBase {
 
 class TestCxxClassBase : public Object {
  public:
-  int64_t v_i64;
-  int32_t v_i32;
-
-  TestCxxClassBase(int64_t v_i64, int32_t v_i32) : v_i64(v_i64), v_i32(v_i32) {}
+  int64_t v_i64 = 0;
+  int32_t v_i32 = 0;
 
   static constexpr bool _type_mutable = true;
   TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxClassBase", TestCxxClassBase, Object);
@@ -112,11 +112,8 @@ class TestCxxClassBase : public Object {
 
 class TestCxxClassDerived : public TestCxxClassBase {
  public:
-  double v_f64;
-  float v_f32;
-
-  TestCxxClassDerived(int64_t v_i64, int32_t v_i32, double v_f64, float v_f32)
-      : TestCxxClassBase(v_i64, v_i32), v_f64(v_f64), v_f32(v_f32) {}
+  double v_f64 = 0.0;
+  float v_f32 = 0.0f;
 
   TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxClassDerived", TestCxxClassDerived, TestCxxClassBase);
 };
@@ -124,11 +121,7 @@ class TestCxxClassDerived : public TestCxxClassBase {
 class TestCxxClassDerivedDerived : public TestCxxClassDerived {
  public:
   String v_str;
-  bool v_bool;
-
-  TestCxxClassDerivedDerived(int64_t v_i64, int32_t v_i32, double v_f64, float v_f32, String v_str,
-                             bool v_bool)
-      : TestCxxClassDerived(v_i64, v_i32, v_f64, v_f32), v_str(std::move(v_str)), v_bool(v_bool) {}
+  bool v_bool = false;
 
   TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxClassDerivedDerived", TestCxxClassDerivedDerived,
                               TestCxxClassDerived);
@@ -136,12 +129,9 @@ class TestCxxClassDerivedDerived : public TestCxxClassDerived {
 
 class TestCxxInitSubsetObj : public Object {
  public:
-  int64_t required_field;
+  int64_t required_field = 0;
   int64_t optional_field = -1;
   String note;
-
-  explicit TestCxxInitSubsetObj(int64_t value, String note)
-      : required_field(value), note(std::move(note)) {}
 
   static constexpr bool _type_mutable = true;
   TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxInitSubset", TestCxxInitSubsetObj, Object);
@@ -149,15 +139,112 @@ class TestCxxInitSubsetObj : public Object {
 
 class TestCxxKwOnly : public Object {
  public:
-  int64_t x;
-  int64_t y;
-  int64_t z;
-  int64_t w;
-
-  TestCxxKwOnly(int64_t x, int64_t y, int64_t z, int64_t w) : x(x), y(y), z(z), w(w) {}
+  int64_t x = 0;
+  int64_t y = 0;
+  int64_t z = 0;
+  int64_t w = 0;
 
   static constexpr bool _type_mutable = true;
   TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxKwOnly", TestCxxKwOnly, Object);
+};
+
+// Test: auto-generated __ffi_init__ with init(false) and KwOnly(true) per-field.
+// No explicit refl::init<>() — the auto-init is generated in ObjectDef's destructor.
+class TestCxxAutoInitObj : public Object {
+ public:
+  int64_t a;  ///< init=True, positional (default)
+  int64_t b;  ///< init=False, has default
+  int64_t c;  ///< init=True, kw_only
+  int64_t d;  ///< init=True, positional, has default
+
+  static constexpr bool _type_mutable = true;
+  TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxAutoInit", TestCxxAutoInitObj, Object);
+};
+
+// Test: auto-generated init with all fields init=True (no Init/KwOnly traits).
+class TestCxxAutoInitSimpleObj : public Object {
+ public:
+  int64_t x;
+  int64_t y;
+
+  static constexpr bool _type_mutable = true;
+  TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxAutoInitSimple", TestCxxAutoInitSimpleObj, Object);
+};
+
+// Test: auto-generated init with all fields excluded from init.
+class TestCxxAutoInitAllInitOffObj : public Object {
+ public:
+  int64_t x = 7;     ///< init=False, has reflection default
+  int64_t y = 0;     ///< init=False, has reflection default
+  int64_t z = 1234;  ///< init=False, no reflection default (creator default is kept)
+
+  static constexpr bool _type_mutable = true;
+  TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxAutoInitAllInitOff", TestCxxAutoInitAllInitOffObj,
+                              Object);
+};
+
+// Test: mixed positional + kw_only + defaults + init=False field.
+class TestCxxAutoInitKwOnlyDefaultsObj : public Object {
+ public:
+  int64_t p_required;  ///< init=True, positional, required
+  int64_t p_default;   ///< init=True, positional, default=11
+  int64_t k_required;  ///< init=True, kw_only, required
+  int64_t k_default;   ///< init=True, kw_only, default=22
+  int64_t hidden;      ///< init=False, default=33
+
+  static constexpr bool _type_mutable = true;
+  TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxAutoInitKwOnlyDefaults",
+                              TestCxxAutoInitKwOnlyDefaultsObj, Object);
+};
+
+// Test: inheritance + auto-generated init.
+class TestCxxAutoInitParentObj : public Object {
+ public:
+  int64_t parent_required;
+  int64_t parent_default;
+
+  static constexpr bool _type_mutable = true;
+  static constexpr uint32_t _type_child_slots = 1;
+  TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxAutoInitParent", TestCxxAutoInitParentObj, Object);
+};
+
+class TestCxxAutoInitChildObj : public TestCxxAutoInitParentObj {
+ public:
+  int64_t child_required;
+  int64_t child_kw_only;
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("testing.TestCxxAutoInitChild", TestCxxAutoInitChildObj,
+                                    TestCxxAutoInitParentObj);
+};
+
+// Test: init(false) at class level suppresses auto-generated __ffi_init__.
+class TestCxxNoAutoInitObj : public Object {
+ public:
+  int64_t x;
+  int64_t y;
+
+  static constexpr bool _type_mutable = true;
+  TVM_FFI_DECLARE_OBJECT_INFO("testing.TestCxxNoAutoInit", TestCxxNoAutoInitObj, Object);
+};
+
+class TestDeepCopyEdgesObj : public Object {
+ public:
+  Any v_any;
+  ObjectRef v_obj;
+
+  static constexpr bool _type_mutable = true;
+  TVM_FFI_DECLARE_OBJECT_INFO("testing.TestDeepCopyEdges", TestDeepCopyEdgesObj, Object);
+};
+
+class TestNonCopyable : public Object {
+ public:
+  int64_t value;
+
+  explicit TestNonCopyable(int64_t value) : value(value) {}
+  TestNonCopyable(const TestNonCopyable&) = delete;
+  TestNonCopyable& operator=(const TestNonCopyable&) = delete;
+
+  TVM_FFI_DECLARE_OBJECT_INFO("testing.TestNonCopyable", TestNonCopyable, Object);
 };
 
 class TestUnregisteredBaseObject : public Object {
@@ -177,6 +264,92 @@ class TestUnregisteredObject : public TestUnregisteredBaseObject {
   int64_t GetV2PlusTwo() const { return v2 + 2; }
   TVM_FFI_DECLARE_OBJECT_INFO("testing.TestUnregisteredObject", TestUnregisteredObject,
                               TestUnregisteredBaseObject);
+};
+
+class TestCompareObj : public Object {
+ public:
+  int64_t key;
+  String name;
+  int64_t ignored_field;
+
+  TestCompareObj() = default;
+  TestCompareObj(int64_t key, String name, int64_t ignored_field)
+      : key(key), name(std::move(name)), ignored_field(ignored_field) {}
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("testing.TestCompare", TestCompareObj, Object);
+};
+
+class TestCompare : public ObjectRef {
+ public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(TestCompare, ObjectRef, TestCompareObj);
+};
+
+class TestHashObj : public Object {
+ public:
+  int64_t key;
+  String name;
+  int64_t hash_ignored;
+
+  TestHashObj() = default;
+  TestHashObj(int64_t key, String name, int64_t hash_ignored)
+      : key(key), name(std::move(name)), hash_ignored(hash_ignored) {}
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("testing.TestHash", TestHashObj, Object);
+};
+
+class TestHash : public ObjectRef {
+ public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(TestHash, ObjectRef, TestHashObj);
+};
+
+class TestCustomHashObj : public Object {
+ public:
+  int64_t key;
+  String label;
+
+  TestCustomHashObj() = default;
+  TestCustomHashObj(int64_t key, String label) : key(key), label(std::move(label)) {}
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("testing.TestCustomHash", TestCustomHashObj, Object);
+};
+
+class TestCustomHash : public ObjectRef {
+ public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(TestCustomHash, ObjectRef, TestCustomHashObj);
+};
+
+class TestCustomCompareObj : public Object {
+ public:
+  int64_t key;
+  String label;
+
+  TestCustomCompareObj() = default;
+  TestCustomCompareObj(int64_t key, String label) : key(key), label(std::move(label)) {}
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("testing.TestCustomCompare", TestCustomCompareObj, Object);
+};
+
+class TestCustomCompare : public ObjectRef {
+ public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(TestCustomCompare, ObjectRef, TestCustomCompareObj);
+};
+
+// Test object with __ffi_eq__ but deliberately no __ffi_hash__.
+// Used to verify the RecursiveHash guard that rejects eq-without-hash types.
+class TestEqWithoutHashObj : public Object {
+ public:
+  int64_t key;
+  String label;
+
+  TestEqWithoutHashObj() = default;
+  TestEqWithoutHashObj(int64_t key, String label) : key(key), label(std::move(label)) {}
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("testing.TestEqWithoutHash", TestEqWithoutHashObj, Object);
+};
+
+class TestEqWithoutHash : public ObjectRef {
+ public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(TestEqWithoutHash, ObjectRef, TestEqWithoutHashObj);
 };
 
 // NOLINTNEXTLINE(performance-unnecessary-value-param)
@@ -212,42 +385,89 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
 
   refl::ObjectDef<TestObjectBase>()
-      .def_rw("v_i64", &TestObjectBase::v_i64, refl::DefaultValue(10), "i64 field")
-      .def_ro("v_f64", &TestObjectBase::v_f64, refl::DefaultValue(10.0))
-      .def_rw("v_str", &TestObjectBase::v_str, refl::DefaultValue("hello"))
+      .def_rw("v_i64", &TestObjectBase::v_i64, refl::default_value(10), "i64 field")
+      .def_ro("v_f64", &TestObjectBase::v_f64, refl::default_value(10.0))
+      .def_rw("v_str", &TestObjectBase::v_str, refl::default_value("hello"))
       .def("add_i64", &TestObjectBase::AddI64, "add_i64 method");
 
   refl::ObjectDef<TestObjectDerived>()
-      .def_ro("v_map", &TestObjectDerived::v_map)
-      .def_ro("v_array", &TestObjectDerived::v_array);
+      .def_rw("v_map", &TestObjectDerived::v_map)
+      .def_rw("v_array", &TestObjectDerived::v_array);
 
   refl::ObjectDef<TestCxxClassBase>()
-      .def(refl::init<int64_t, int32_t>())
-      .def_rw("v_i64", &TestCxxClassBase::v_i64)
-      .def_rw("v_i32", &TestCxxClassBase::v_i32);
+      .def_rw("v_i64", &TestCxxClassBase::v_i64, refl::repr(false))
+      .def_rw("v_i32", &TestCxxClassBase::v_i32, refl::repr(false));
 
   refl::ObjectDef<TestCxxClassDerived>()
-      .def(refl::init<int64_t, int32_t, double, float>())
       .def_rw("v_f64", &TestCxxClassDerived::v_f64)
-      .def_rw("v_f32", &TestCxxClassDerived::v_f32);
+      .def_rw("v_f32", &TestCxxClassDerived::v_f32, refl::default_value(float{8.0f}));
 
   refl::ObjectDef<TestCxxClassDerivedDerived>()
-      .def(refl::init<int64_t, int32_t, double, float, String, bool>())
-      .def_rw("v_str", &TestCxxClassDerivedDerived::v_str)
+      .def_rw("v_str", &TestCxxClassDerivedDerived::v_str, refl::default_value(String("default")))
       .def_rw("v_bool", &TestCxxClassDerivedDerived::v_bool);
 
   refl::ObjectDef<TestCxxInitSubsetObj>()
-      .def(refl::init<int64_t, String>())
       .def_rw("required_field", &TestCxxInitSubsetObj::required_field)
-      .def_rw("optional_field", &TestCxxInitSubsetObj::optional_field)
-      .def_rw("note", &TestCxxInitSubsetObj::note);
+      .def_rw("optional_field", &TestCxxInitSubsetObj::optional_field, refl::init(false),
+              refl::default_value(int64_t{-1}))
+      .def_rw("note", &TestCxxInitSubsetObj::note, refl::init(false),
+              refl::default_value(String("default")));
 
   refl::ObjectDef<TestCxxKwOnly>()
-      .def(refl::init<int64_t, int64_t, int64_t, int64_t>())
-      .def_rw("x", &TestCxxKwOnly::x)
-      .def_rw("y", &TestCxxKwOnly::y)
-      .def_rw("z", &TestCxxKwOnly::z)
-      .def_rw("w", &TestCxxKwOnly::w);
+      .def_rw("x", &TestCxxKwOnly::x, refl::kw_only(true))
+      .def_rw("y", &TestCxxKwOnly::y, refl::kw_only(true))
+      .def_rw("z", &TestCxxKwOnly::z, refl::kw_only(true))
+      .def_rw("w", &TestCxxKwOnly::w, refl::kw_only(true), refl::default_value(int64_t{100}));
+
+  // No refl::init<>() — auto-generates __ffi_init__ in ObjectDef destructor.
+  refl::ObjectDef<TestCxxAutoInitObj>()
+      .def_rw("a", &TestCxxAutoInitObj::a)
+      .def_rw("b", &TestCxxAutoInitObj::b, refl::init(false), refl::default_value(int64_t{42}))
+      .def_rw("c", &TestCxxAutoInitObj::c, refl::kw_only(true))
+      .def_rw("d", &TestCxxAutoInitObj::d, refl::default_value(int64_t{99}));
+
+  refl::ObjectDef<TestCxxAutoInitSimpleObj>()
+      .def_rw("x", &TestCxxAutoInitSimpleObj::x)
+      .def_rw("y", &TestCxxAutoInitSimpleObj::y);
+
+  refl::ObjectDef<TestCxxAutoInitAllInitOffObj>()
+      .def_rw("x", &TestCxxAutoInitAllInitOffObj::x, refl::init(false),
+              refl::default_value(int64_t{7}))
+      .def_rw("y", &TestCxxAutoInitAllInitOffObj::y, refl::init(false),
+              refl::default_value(int64_t{9}))
+      .def_rw("z", &TestCxxAutoInitAllInitOffObj::z, refl::init(false));
+
+  refl::ObjectDef<TestCxxAutoInitKwOnlyDefaultsObj>()
+      .def_rw("p_required", &TestCxxAutoInitKwOnlyDefaultsObj::p_required)
+      .def_rw("p_default", &TestCxxAutoInitKwOnlyDefaultsObj::p_default,
+              refl::default_value(int64_t{11}))
+      .def_rw("k_required", &TestCxxAutoInitKwOnlyDefaultsObj::k_required, refl::kw_only(true))
+      .def_rw("k_default", &TestCxxAutoInitKwOnlyDefaultsObj::k_default, refl::kw_only(true),
+              refl::default_value(int64_t{22}))
+      .def_rw("hidden", &TestCxxAutoInitKwOnlyDefaultsObj::hidden, refl::init(false),
+              refl::default_value(int64_t{33}));
+
+  refl::ObjectDef<TestCxxAutoInitParentObj>()
+      .def_rw("parent_required", &TestCxxAutoInitParentObj::parent_required)
+      .def_rw("parent_default", &TestCxxAutoInitParentObj::parent_default,
+              refl::default_value(int64_t{5}));
+
+  refl::ObjectDef<TestCxxAutoInitChildObj>()
+      .def_rw("child_required", &TestCxxAutoInitChildObj::child_required)
+      .def_rw("child_kw_only", &TestCxxAutoInitChildObj::child_kw_only, refl::kw_only(true));
+
+  // init(false) at class level: has fields, has creator, but no __ffi_init__.
+  refl::ObjectDef<TestCxxNoAutoInitObj>(refl::init(false))
+      .def_rw("x", &TestCxxNoAutoInitObj::x)
+      .def_rw("y", &TestCxxNoAutoInitObj::y);
+
+  refl::ObjectDef<TestDeepCopyEdgesObj>()
+      .def_rw("v_any", &TestDeepCopyEdgesObj::v_any)
+      .def_rw("v_obj", &TestDeepCopyEdgesObj::v_obj);
+
+  refl::ObjectDef<TestNonCopyable>()
+      .def(refl::init<int64_t>())
+      .def_ro("value", &TestNonCopyable::value);
 
   refl::ObjectDef<TestUnregisteredBaseObject>()
       .def(refl::init<int64_t>(), "Constructor of TestUnregisteredBaseObject")
@@ -261,6 +481,33 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def_ro("v2", &TestUnregisteredObject::v2)
       .def("get_v2_plus_two", &TestUnregisteredObject::GetV2PlusTwo,
            "Get (v2 + 2) from TestUnregisteredObject");
+
+  refl::ObjectDef<TestCompareObj>()
+      .def(refl::init<int64_t, String, int64_t>())
+      .def_ro("key", &TestCompareObj::key)
+      .def_ro("name", &TestCompareObj::name)
+      .def_ro("ignored_field", &TestCompareObj::ignored_field, refl::compare(false));
+
+  refl::ObjectDef<TestHashObj>()
+      .def(refl::init<int64_t, String, int64_t>())
+      .def_ro("key", &TestHashObj::key)
+      .def_ro("name", &TestHashObj::name)
+      .def_ro("hash_ignored", &TestHashObj::hash_ignored, refl::hash(false));
+
+  refl::ObjectDef<TestCustomHashObj>()
+      .def(refl::init<int64_t, String>())
+      .def_ro("key", &TestCustomHashObj::key)
+      .def_ro("label", &TestCustomHashObj::label);
+
+  refl::ObjectDef<TestCustomCompareObj>()
+      .def(refl::init<int64_t, String>())
+      .def_ro("key", &TestCustomCompareObj::key)
+      .def_ro("label", &TestCustomCompareObj::label);
+
+  refl::ObjectDef<TestEqWithoutHashObj>()
+      .def(refl::init<int64_t, String>())
+      .def_ro("key", &TestEqWithoutHashObj::key)
+      .def_ro("label", &TestEqWithoutHashObj::label);
 
   refl::GlobalDef()
       .def("testing.test_raise_error", TestRaiseError)
@@ -353,6 +600,15 @@ Variant<int64_t, String, Array<int64_t>> schema_variant_mix(
     Variant<int64_t, String, Array<int64_t>> v) {
   return v;
 }
+
+// List types
+List<int64_t> schema_id_list_int(List<int64_t> lst) { return lst; }
+List<String> schema_id_list_str(List<String> lst) { return lst; }
+List<ObjectRef> schema_id_list_obj(List<ObjectRef> lst) { return lst; }
+
+// Dict types
+Dict<String, int64_t> schema_id_dict_str_int(Dict<String, int64_t> d) { return d; }
+Dict<String, String> schema_id_dict_str_str(Dict<String, String> d) { return d; }
 
 // Complex nested types
 Map<String, Array<int64_t>> schema_arr_map_opt(const Array<Optional<int64_t>>& arr,
@@ -459,11 +715,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
               refl::Metadata{{"bool_attr", true},  //
                              {"int_attr", 1},      //
                              {"str_attr", "hello"}})
-      .def_rw("v_int", &SchemaAllTypesObj::v_int, refl::DefaultValue(0), "int field")
-      .def_rw("v_float", &SchemaAllTypesObj::v_float, refl::DefaultValue(0.0), "float field")
+      .def_rw("v_int", &SchemaAllTypesObj::v_int, refl::default_value(0), "int field")
+      .def_rw("v_float", &SchemaAllTypesObj::v_float, refl::default_value(0.0), "float field")
       .def_rw("v_device", &SchemaAllTypesObj::v_device, "device field")
       .def_rw("v_dtype", &SchemaAllTypesObj::v_dtype, "dtype field")
-      .def_rw("v_string", &SchemaAllTypesObj::v_string, refl::DefaultValue("s"), "string field")
+      .def_rw("v_string", &SchemaAllTypesObj::v_string, refl::default_value("s"), "string field")
       .def_rw("v_bytes", &SchemaAllTypesObj::v_bytes, "bytes field")
       .def_rw("v_opt_int", &SchemaAllTypesObj::v_opt_int, "optional int")
       .def_rw("v_opt_str", &SchemaAllTypesObj::v_opt_str, "optional str")
@@ -516,10 +772,15 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("testing.schema_id_arr_str", schema_test_impl::schema_id_arr_str)
       .def("testing.schema_id_arr_obj", schema_test_impl::schema_id_arr_obj)
       .def("testing.schema_id_arr", schema_test_impl::schema_id_arr)
+      .def("testing.schema_id_list_int", schema_test_impl::schema_id_list_int)
+      .def("testing.schema_id_list_str", schema_test_impl::schema_id_list_str)
+      .def("testing.schema_id_list_obj", schema_test_impl::schema_id_list_obj)
       .def("testing.schema_id_map_str_int", schema_test_impl::schema_id_map_str_int)
       .def("testing.schema_id_map_str_str", schema_test_impl::schema_id_map_str_str)
       .def("testing.schema_id_map_str_obj", schema_test_impl::schema_id_map_str_obj)
       .def("testing.schema_id_map", schema_test_impl::schema_id_map)
+      .def("testing.schema_id_dict_str_int", schema_test_impl::schema_id_dict_str_int)
+      .def("testing.schema_id_dict_str_str", schema_test_impl::schema_id_dict_str_str)
       .def("testing.schema_id_variant_int_str", schema_test_impl::schema_id_variant_int_str)
       .def_packed("testing.schema_packed", [](PackedArgs args, Any* ret) {})
       .def("testing.schema_arr_map_opt", schema_test_impl::schema_arr_map_opt)
@@ -530,6 +791,47 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("testing.schema_no_args_no_return", schema_test_impl::schema_no_args_no_return);
   TVMFFIEnvModRegisterSystemLibSymbol("__tvm_ffi_testing.add_one",
                                       reinterpret_cast<void*>(__add_one_c_symbol));
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  // Register __ffi_hash__ for TestCustomHash: only hashes `key`, ignores `label`.
+  refl::TypeAttrDef<TestCustomHashObj>().def(
+      refl::type_attr::kHash, [](const Object* self, const Function& fn_hash) -> int64_t {
+        auto* obj = static_cast<const TestCustomHashObj*>(self);
+        return fn_hash(AnyView(obj->key)).cast<int64_t>();
+      });
+  // Register __ffi_hash__ for TestCustomCompare: only hashes `key`, consistent with eq/compare.
+  refl::TypeAttrDef<TestCustomCompareObj>().def(
+      refl::type_attr::kHash, [](const Object* self, const Function& fn_hash) -> int64_t {
+        auto* obj = static_cast<const TestCustomCompareObj*>(self);
+        return fn_hash(AnyView(obj->key)).cast<int64_t>();
+      });
+  // Register __ffi_eq__ for TestCustomCompare: compares only `key`.
+  refl::TypeAttrDef<TestCustomCompareObj>().def(
+      refl::type_attr::kEq,
+      [](const Object* lhs, const Object* rhs, const Function& fn_eq) -> bool {
+        auto* a = static_cast<const TestCustomCompareObj*>(lhs);
+        auto* b = static_cast<const TestCustomCompareObj*>(rhs);
+        return fn_eq(AnyView(a->key), AnyView(b->key)).cast<bool>();
+      });
+  // Register __ffi_compare__ for TestCustomCompare: three-way ordering on `key`.
+  refl::TypeAttrDef<TestCustomCompareObj>().def(
+      refl::type_attr::kCompare,
+      [](const Object* lhs, const Object* rhs, const Function& fn_cmp) -> int32_t {
+        auto* a = static_cast<const TestCustomCompareObj*>(lhs);
+        auto* b = static_cast<const TestCustomCompareObj*>(rhs);
+        return fn_cmp(AnyView(a->key), AnyView(b->key)).cast<int32_t>();
+      });
+  // Register __ffi_eq__ for TestEqWithoutHash: deliberately no __ffi_hash__.
+  // This exercises the RecursiveHash guard that rejects eq-without-hash types.
+  refl::TypeAttrDef<TestEqWithoutHashObj>().def(
+      refl::type_attr::kEq,
+      [](const Object* lhs, const Object* rhs, const Function& fn_eq) -> bool {
+        auto* a = static_cast<const TestEqWithoutHashObj*>(lhs);
+        auto* b = static_cast<const TestEqWithoutHashObj*>(rhs);
+        return fn_eq(AnyView(a->key), AnyView(b->key)).cast<bool>();
+      });
 }
 
 }  // namespace ffi

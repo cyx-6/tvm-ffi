@@ -28,9 +28,10 @@ if TYPE_CHECKING:
 # fmt: on
 # tvm-ffi-stubgen(end)
 import json
+from collections.abc import Sequence
 from enum import IntEnum
 from os import PathLike, fspath
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 from . import _ffi_api, core
 from .registry import register_object
@@ -113,6 +114,7 @@ class Module(core.Object):
     # tvm-ffi-stubgen(end)
 
     entry_name: ClassVar[str] = "main"  # constant for entry function name
+    __slots__ = ("__dict__",)
 
     @property
     def kind(self) -> str:
@@ -129,7 +131,7 @@ class Module(core.Object):
             The module
 
         """
-        return self.imports_  # type: ignore[return-value]
+        return self.imports_  # ty: ignore[invalid-return-type]
 
     def implements_function(self, name: str, query_imports: bool = False) -> bool:
         """Return True if the module defines a global function.
@@ -162,10 +164,10 @@ class Module(core.Object):
         """Accessor to allow getting functions as attributes."""
         try:
             func = self.get_function(name)
-            self.__dict__[name] = func
-            return func
-        except AttributeError:
-            raise AttributeError(f"Module has no function '{name}'")
+        except AttributeError as exc:
+            raise AttributeError(f"Module has no function '{name}'") from exc
+        setattr(self, name, func)
+        return func
 
     def get_function(self, name: str, query_imports: bool = False) -> core.Function:
         """Get function from the module.

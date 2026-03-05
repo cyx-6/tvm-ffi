@@ -154,12 +154,12 @@ class TypeAttrColumn {
    * \return The type attribute column.
    */
   AnyView operator[](int32_t type_index) const {
-    size_t tindex = static_cast<size_t>(type_index);
-    if (tindex >= column_->size) {
+    int32_t offset = type_index - column_->begin_index;
+    if (offset < 0 || offset >= column_->size) {
       return AnyView();
     }
     const AnyView* any_view_data = reinterpret_cast<const AnyView*>(column_->data);
-    return any_view_data[tindex];
+    return any_view_data[offset];
   }
 
  private:
@@ -197,6 +197,28 @@ inline const TVMFFIMethodInfo* GetMethodInfo(std::string_view type_key, const ch
 inline Function GetMethod(std::string_view type_key, const char* method_name) {
   const TVMFFIMethodInfo* info = GetMethodInfo(type_key, method_name);
   return AnyView::CopyFromTVMFFIAny(info->method).cast<Function>();
+}
+
+/*!
+ * \brief Set a field to its default value, calling the factory if applicable.
+ *
+ * When kTVMFFIFieldFlagBitMaskDefaultFromFactory is set, extracts the
+ * Function from default_value_or_factory, calls it with no arguments,
+ * and uses the result. Otherwise, passes default_value_or_factory directly
+ * to the setter.
+ *
+ * \param field_info The field info (must have kTVMFFIFieldFlagBitMaskHasDefault set).
+ * \param field_addr The address of the field in the object.
+ */
+inline void SetFieldToDefault(const TVMFFIFieldInfo* field_info, void* field_addr) {
+  if (field_info->flags & kTVMFFIFieldFlagBitMaskDefaultFromFactory) {
+    Function factory =
+        AnyView::CopyFromTVMFFIAny(field_info->default_value_or_factory).cast<Function>();
+    Any default_val = factory();
+    field_info->setter(field_addr, reinterpret_cast<const TVMFFIAny*>(&default_val));
+  } else {
+    field_info->setter(field_addr, &(field_info->default_value_or_factory));
+  }
 }
 
 /*!

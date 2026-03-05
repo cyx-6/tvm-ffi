@@ -17,17 +17,16 @@
 
 from __future__ import annotations
 
-from types import ModuleType
 from typing import Any, NamedTuple, NoReturn
 
 import numpy.typing as npt
 import pytest
 
-torch: ModuleType | None
 try:
-    import torch  # type: ignore[no-redef]
+    import torch
+    import torch.version
 except ImportError:
-    torch = None
+    torch = None  # ty: ignore[invalid-assignment]
 
 import numpy as np
 import tvm_ffi

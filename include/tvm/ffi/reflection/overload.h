@@ -388,6 +388,7 @@ class OverloadObjectDef : private ObjectDef<Class> {
   template <typename... Args, typename... Extra>
   TVM_FFI_INLINE OverloadObjectDef& def([[maybe_unused]] init<Args...> init_func,
                                         Extra&&... extra) {
+    this->has_explicit_init_ = true;
     RegisterMethod(kInitMethodName, true, &init<Args...>::template execute<Class>,
                    std::forward<Extra>(extra)...);
     return *this;
@@ -449,7 +450,7 @@ class OverloadObjectDef : private ObjectDef<Class> {
     info.getter = ReflectionDefBase::FieldGetter<T>;
     info.setter = ReflectionDefBase::FieldSetter<T>;
     // initialize default value to nullptr
-    info.default_value = AnyView(nullptr).CopyToTVMFFIAny();
+    info.default_value_or_factory = AnyView(nullptr).CopyToTVMFFIAny();
     info.doc = TVMFFIByteArray{nullptr, 0};
     info.metadata_.emplace_back("type_schema", details::TypeSchema<T>::v());
     // apply field info traits

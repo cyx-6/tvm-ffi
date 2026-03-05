@@ -18,6 +18,7 @@
  * under the License.
  */
 #include <gtest/gtest.h>
+#include <tvm/ffi/container/array.h>
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/object.h>
 #include <tvm/ffi/reflection/access_path.h>
@@ -61,6 +62,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   TVarObj::RegisterReflection();
   TFuncObj::RegisterReflection();
   TCustomFuncObj::RegisterReflection();
+  TAllFieldsObj::RegisterReflection();
+  TWithDefaultsObj::RegisterReflection();
 
   refl::ObjectDef<TestObjA>()
       .def(refl::init<int64_t, int64_t>())
@@ -101,13 +104,14 @@ TEST(Reflection, FieldInfo) {
   EXPECT_EQ(Bytes(info_int->doc).operator std::string(), "");
 
   const TVMFFIFieldInfo* info_float = reflection::GetFieldInfo("test.Float", "value");
-  EXPECT_EQ(info_float->default_value.v_float64, 10.0);
+  EXPECT_EQ(info_float->default_value_or_factory.v_float64, 10.0);
   EXPECT_TRUE(info_float->flags & kTVMFFIFieldFlagBitMaskHasDefault);
   EXPECT_FALSE(info_float->flags & kTVMFFIFieldFlagBitMaskWritable);
   EXPECT_EQ(Bytes(info_float->doc).operator std::string(), "float value field");
 
   const TVMFFIFieldInfo* info_prim_expr_dtype = reflection::GetFieldInfo("test.PrimExpr", "dtype");
-  AnyView default_value = AnyView::CopyFromTVMFFIAny(info_prim_expr_dtype->default_value);
+  AnyView default_value =
+      AnyView::CopyFromTVMFFIAny(info_prim_expr_dtype->default_value_or_factory);
   EXPECT_EQ(default_value.cast<String>(), "float");
   EXPECT_TRUE(info_prim_expr_dtype->flags & kTVMFFIFieldFlagBitMaskHasDefault);
   EXPECT_TRUE(info_prim_expr_dtype->flags & kTVMFFIFieldFlagBitMaskWritable);
@@ -172,6 +176,24 @@ TEST(Reflection, ForEachFieldInfo) {
 
 TEST(Reflection, TypeAttrColumn) {
   reflection::TypeAttrColumn size_attr("test.size");
+  EXPECT_EQ(size_attr[TIntObj::RuntimeTypeIndex()].cast<int>(), sizeof(TIntObj));
+}
+
+TEST(Reflection, TypeAttrColumnBeginIndex) {
+  // Get the column and verify begin_index
+  TVMFFIByteArray attr_name = {"test.size", std::char_traits<char>::length("test.size")};
+  const TVMFFITypeAttrColumn* column = TVMFFIGetTypeAttrColumn(&attr_name);
+  ASSERT_NE(column, nullptr);
+  // begin_index should be >= 0
+  EXPECT_GE(column->begin_index, 0);
+  // size should cover the range from begin_index
+  EXPECT_GT(column->size, 0);
+  // verify that lookup of a type_index below begin_index returns None
+  reflection::TypeAttrColumn size_attr("test.size");
+  AnyView result = size_attr[0];  // index 0 is kTVMFFINone, unlikely to have this attr
+  (void)result;  // suppress unused variable warning; we only verify no crash occurs
+  // The result may or may not be None depending on begin_index; the key is no crash.
+  // verify the known registered entry still works
   EXPECT_EQ(size_attr[TIntObj::RuntimeTypeIndex()].cast<int>(), sizeof(TIntObj));
 }
 
@@ -295,6 +317,25 @@ TEST(Reflection, AccessPath) {
   EXPECT_FALSE(root_parent.has_value());
 }
 
+struct TestObjWithFactory : public Object {
+  Array<ObjectRef> items;
+  int64_t count;
+
+  explicit TestObjWithFactory(UnsafeInit) {}
+
+  [[maybe_unused]] static constexpr bool _type_mutable = true;
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("test.TestObjWithFactory", TestObjWithFactory, Object);
+};
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::ObjectDef<TestObjWithFactory>()
+      .def_ro("items", &TestObjWithFactory::items,
+              refl::default_factory(
+                  Function::FromTyped([]() -> Array<ObjectRef> { return Array<ObjectRef>(); })))
+      .def_ro("count", &TestObjWithFactory::count, refl::default_value(static_cast<int64_t>(0)));
+}
+
 struct TestObjWithAny : public Object {
   Any value;
   explicit TestObjWithAny(Any value) : value(std::move(value)) {}
@@ -350,4 +391,232 @@ TEST(Reflection, InitWithAnyView) {
   ASSERT_TRUE(obj3.as<TestObjWithAnyView>() != nullptr);
   EXPECT_EQ(obj3.as<TestObjWithAnyView>()->value.cast<String>(), "hello");
 }
+TEST(Reflection, DefaultFactoryFlag) {
+  const TVMFFIFieldInfo* info_items = reflection::GetFieldInfo("test.TestObjWithFactory", "items");
+  EXPECT_TRUE(info_items->flags & kTVMFFIFieldFlagBitMaskHasDefault);
+  EXPECT_TRUE(info_items->flags & kTVMFFIFieldFlagBitMaskDefaultFromFactory);
+
+  const TVMFFIFieldInfo* info_count = reflection::GetFieldInfo("test.TestObjWithFactory", "count");
+  EXPECT_TRUE(info_count->flags & kTVMFFIFieldFlagBitMaskHasDefault);
+  EXPECT_FALSE(info_count->flags & kTVMFFIFieldFlagBitMaskDefaultFromFactory);
+}
+
+TEST(Reflection, DefaultFactoryCreation) {
+  namespace refl = tvm::ffi::reflection;
+  refl::ObjectCreator creator("test.TestObjWithFactory");
+
+  // Create two objects without providing "items" - each should get a fresh Array
+  Any obj1 = creator(Map<String, Any>({{"count", static_cast<int64_t>(42)}}));
+  Any obj2 = creator(Map<String, Any>({{"count", static_cast<int64_t>(99)}}));
+
+  auto* p1 = obj1.as<TestObjWithFactory>();
+  auto* p2 = obj2.as<TestObjWithFactory>();
+
+  ASSERT_NE(p1, nullptr);
+  ASSERT_NE(p2, nullptr);
+  EXPECT_EQ(p1->count, 42);
+  EXPECT_EQ(p2->count, 99);
+  // Both should have empty arrays
+  EXPECT_EQ(p1->items.size(), 0);
+  EXPECT_EQ(p2->items.size(), 0);
+  // Crucially, the arrays should be distinct objects (not aliased)
+  EXPECT_NE(p1->items.get(), p2->items.get());
+}
+
+TEST(Reflection, DefaultFactoryNotCalledWhenProvided) {
+  namespace refl = tvm::ffi::reflection;
+  refl::ObjectCreator creator("test.TestObjWithFactory");
+
+  Array<ObjectRef> custom_items;
+  custom_items.push_back(TInt(1));
+  Any obj =
+      creator(Map<String, Any>({{"items", custom_items}, {"count", static_cast<int64_t>(5)}}));
+
+  auto* p = obj.as<TestObjWithFactory>();
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(p->items.size(), 1);
+  EXPECT_EQ(p->count, 5);
+}
+
+// ---------------------------------------------------------------------------
+// Tests for auto-generated __ffi_init__ with init(false) / KwOnly(true)
+// ---------------------------------------------------------------------------
+
+struct TestAutoInitObj : public Object {
+  int64_t a;
+  int64_t b;
+  int64_t c;
+  int64_t d;
+
+  static constexpr bool _type_mutable = true;
+  TVM_FFI_DECLARE_OBJECT_INFO("test.AutoInit", TestAutoInitObj, Object);
+};
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  // No refl::init<>() — auto-generates __ffi_init__
+  refl::ObjectDef<TestAutoInitObj>()
+      .def_rw("a", &TestAutoInitObj::a)
+      .def_rw("b", &TestAutoInitObj::b, refl::init(false), refl::default_value(int64_t{42}))
+      .def_rw("c", &TestAutoInitObj::c, refl::kw_only(true))
+      .def_rw("d", &TestAutoInitObj::d, refl::default_value(int64_t{99}));
+}
+
+TEST(Reflection, AutoInitPositional) {
+  // Auto-generated init: positional args for non-kw-only init=True fields (a, d)
+  // c is kw_only so it cannot be passed positionally.
+  Function auto_init = reflection::GetMethod("test.AutoInit", "__ffi_init__");
+  ObjectRef kwargs = Function::GetGlobalRequired("ffi.GetKwargsObject")().cast<ObjectRef>();
+  // Positional: a=1, d=3; keyword: c=2
+  Any obj = auto_init(int64_t{1}, int64_t{3}, kwargs, String("c"), int64_t{2});
+  auto* p = obj.as<TestAutoInitObj>();
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(p->a, 1);
+  EXPECT_EQ(p->b, 42);  // init=False, gets default
+  EXPECT_EQ(p->c, 2);   // kw_only, passed via KWARGS
+  EXPECT_EQ(p->d, 3);   // init=True, 2nd positional
+}
+
+TEST(Reflection, AutoInitPartialPositional) {
+  // Provide only a (position 0); c is required but missing → error
+  Function auto_init = reflection::GetMethod("test.AutoInit", "__ffi_init__");
+  EXPECT_THROW(
+      {
+        try {
+          auto_init(int64_t{1});
+        } catch (const std::exception& e) {
+          EXPECT_NE(std::string(e.what()).find("missing required"), std::string::npos);
+          throw;
+        }
+      },
+      std::exception);
+}
+
+TEST(Reflection, AutoInitWithDefaults) {
+  // Provide a positionally and c via KWARGS; d should use default 99
+  Function auto_init = reflection::GetMethod("test.AutoInit", "__ffi_init__");
+  ObjectRef kwargs = Function::GetGlobalRequired("ffi.GetKwargsObject")().cast<ObjectRef>();
+  Any obj = auto_init(int64_t{10}, kwargs, String("c"), int64_t{20});
+  auto* p = obj.as<TestAutoInitObj>();
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(p->a, 10);
+  EXPECT_EQ(p->b, 42);  // default
+  EXPECT_EQ(p->c, 20);  // provided via KWARGS
+  EXPECT_EQ(p->d, 99);  // default
+}
+
+TEST(Reflection, AutoInitKwargs) {
+  Function auto_init = reflection::GetMethod("test.AutoInit", "__ffi_init__");
+  ObjectRef kwargs = Function::GetGlobalRequired("ffi.GetKwargsObject")().cast<ObjectRef>();
+
+  // Positional: a=1, then KWARGS: c=30, d=40
+  Any obj = auto_init(int64_t{1}, kwargs, String("c"), int64_t{30}, String("d"), int64_t{40});
+  auto* p = obj.as<TestAutoInitObj>();
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(p->a, 1);
+  EXPECT_EQ(p->b, 42);  // default
+  EXPECT_EQ(p->c, 30);
+  EXPECT_EQ(p->d, 40);
+}
+
+TEST(Reflection, AutoInitKwargsOnly) {
+  Function auto_init = reflection::GetMethod("test.AutoInit", "__ffi_init__");
+  ObjectRef kwargs = Function::GetGlobalRequired("ffi.GetKwargsObject")().cast<ObjectRef>();
+
+  // No positional args, all via KWARGS
+  Any obj = auto_init(kwargs, String("a"), int64_t{5}, String("c"), int64_t{15}, String("d"),
+                      int64_t{25});
+  auto* p = obj.as<TestAutoInitObj>();
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(p->a, 5);
+  EXPECT_EQ(p->b, 42);
+  EXPECT_EQ(p->c, 15);
+  EXPECT_EQ(p->d, 25);
+}
+
+TEST(Reflection, AutoInitKwargsDuplicate) {
+  Function auto_init = reflection::GetMethod("test.AutoInit", "__ffi_init__");
+  ObjectRef kwargs = Function::GetGlobalRequired("ffi.GetKwargsObject")().cast<ObjectRef>();
+
+  // a is provided positionally AND as kwarg → error
+  EXPECT_THROW(
+      {
+        try {
+          auto_init(int64_t{1}, kwargs, String("a"), int64_t{2}, String("c"), int64_t{3});
+        } catch (const std::exception& e) {
+          EXPECT_NE(std::string(e.what()).find("multiple values"), std::string::npos);
+          throw;
+        }
+      },
+      std::exception);
+}
+
+TEST(Reflection, AutoInitKwargsUnknown) {
+  Function auto_init = reflection::GetMethod("test.AutoInit", "__ffi_init__");
+  ObjectRef kwargs = Function::GetGlobalRequired("ffi.GetKwargsObject")().cast<ObjectRef>();
+
+  EXPECT_THROW(
+      {
+        try {
+          auto_init(kwargs, String("a"), int64_t{1}, String("z"), int64_t{2}, String("c"),
+                    int64_t{3});
+        } catch (const std::exception& e) {
+          EXPECT_NE(std::string(e.what()).find("unexpected keyword"), std::string::npos);
+          throw;
+        }
+      },
+      std::exception);
+}
+
+TEST(Reflection, AutoInitFlagBits) {
+  // Verify the flag bits are set correctly on the field info.
+  const TVMFFIFieldInfo* fi_a = reflection::GetFieldInfo("test.AutoInit", "a");
+  EXPECT_FALSE(fi_a->flags & kTVMFFIFieldFlagBitMaskInitOff);
+  EXPECT_FALSE(fi_a->flags & kTVMFFIFieldFlagBitMaskKwOnly);
+
+  const TVMFFIFieldInfo* fi_b = reflection::GetFieldInfo("test.AutoInit", "b");
+  EXPECT_TRUE(fi_b->flags & kTVMFFIFieldFlagBitMaskInitOff);
+  EXPECT_FALSE(fi_b->flags & kTVMFFIFieldFlagBitMaskKwOnly);
+  EXPECT_TRUE(fi_b->flags & kTVMFFIFieldFlagBitMaskHasDefault);
+
+  const TVMFFIFieldInfo* fi_c = reflection::GetFieldInfo("test.AutoInit", "c");
+  EXPECT_FALSE(fi_c->flags & kTVMFFIFieldFlagBitMaskInitOff);
+  EXPECT_TRUE(fi_c->flags & kTVMFFIFieldFlagBitMaskKwOnly);
+
+  const TVMFFIFieldInfo* fi_d = reflection::GetFieldInfo("test.AutoInit", "d");
+  EXPECT_FALSE(fi_d->flags & kTVMFFIFieldFlagBitMaskInitOff);
+  EXPECT_FALSE(fi_d->flags & kTVMFFIFieldFlagBitMaskKwOnly);
+  EXPECT_TRUE(fi_d->flags & kTVMFFIFieldFlagBitMaskHasDefault);
+}
+
+// Simple auto-init test: all fields init=True, no Init/KwOnly traits
+struct TestAutoInitSimpleObj : public Object {
+  int64_t x;
+  int64_t y;
+
+  static constexpr bool _type_mutable = true;
+  TVM_FFI_DECLARE_OBJECT_INFO("test.AutoInitSimple", TestAutoInitSimpleObj, Object);
+};
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::ObjectDef<TestAutoInitSimpleObj>()
+      .def_rw("x", &TestAutoInitSimpleObj::x)
+      .def_rw("y", &TestAutoInitSimpleObj::y);
+}
+
+TEST(Reflection, AutoInitSimple) {
+  Function auto_init = reflection::GetMethod("test.AutoInitSimple", "__ffi_init__");
+  Any obj = auto_init(int64_t{10}, int64_t{20});
+  auto* p = obj.as<TestAutoInitSimpleObj>();
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(p->x, 10);
+  EXPECT_EQ(p->y, 20);
+}
+
+TEST(Reflection, AutoInitSimpleTooManyArgs) {
+  Function auto_init = reflection::GetMethod("test.AutoInitSimple", "__ffi_init__");
+  EXPECT_THROW(auto_init(int64_t{1}, int64_t{2}, int64_t{3}), std::exception);
+}
+
 }  // namespace

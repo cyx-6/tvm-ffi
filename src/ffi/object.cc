@@ -20,18 +20,27 @@
  * \file src/ffi/object.cc
  * \brief Registry to record dynamic types
  */
+#include <tvm/ffi/any.h>
 #include <tvm/ffi/c_api.h>
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/error.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/memory.h>
+#include <tvm/ffi/object.h>
+#include <tvm/ffi/reflection/accessor.h>
+#include <tvm/ffi/reflection/init.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ffi/string.h>
 
+#include <algorithm>
 #include <memory>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "object_internal.h"
 
 namespace tvm {
 namespace ffi {
@@ -211,10 +220,11 @@ class TypeTable {
     field_data.doc = this->CopyString(info->doc);
     field_data.metadata = this->CopyString(info->metadata);
     if (info->flags & kTVMFFIFieldFlagBitMaskHasDefault) {
-      field_data.default_value =
-          this->CopyAny(AnyView::CopyFromTVMFFIAny(info->default_value)).CopyToTVMFFIAny();
+      field_data.default_value_or_factory =
+          this->CopyAny(AnyView::CopyFromTVMFFIAny(info->default_value_or_factory))
+              .CopyToTVMFFIAny();
     } else {
-      field_data.default_value = AnyView(nullptr).CopyToTVMFFIAny();
+      field_data.default_value_or_factory = AnyView(nullptr).CopyToTVMFFIAny();
     }
     entry->type_fields_data.push_back(field_data);
     // refresh ptr as the data can change
@@ -262,17 +272,29 @@ class TypeTable {
       column_index = (*it).second;
     }
     TypeAttrColumnData* column = type_attr_columns_[column_index].get();
-    if (column->data_.size() < static_cast<size_t>(type_index) + 1) {
-      column->data_.resize(static_cast<size_t>(type_index) + 1, Any(nullptr));
-      column->data = reinterpret_cast<const TVMFFIAny*>(column->data_.data());
-      column->size = column->data_.size();
+    if (type_index == kTVMFFINone) {
+      // Sentinel: just ensure the column exists without registering a value.
+      if (column->data_.empty()) {
+        column->data = reinterpret_cast<const TVMFFIAny*>(column->data_.data());
+        column->size = 0;
+        column->begin_index = 0;
+      }
+      return;
     }
-    if (type_index == kTVMFFINone) return;
-    if (column->data_[type_index] != nullptr) {
+    // TODO(1.0): set begin_index to first registered type_index for sparse column storage
+    // For now, begin_index is always 0 (resize from index 0).
+    if (static_cast<size_t>(type_index) >= column->data_.size()) {
+      // Extend back from index 0.
+      column->data_.resize(static_cast<size_t>(type_index) + 1, Any(nullptr));
+    }
+    column->data = reinterpret_cast<const TVMFFIAny*>(column->data_.data());
+    column->size = static_cast<int32_t>(column->data_.size());
+    column->begin_index = 0;
+    if (column->data_[type_index - column->begin_index] != nullptr) {
       TVM_FFI_THROW(RuntimeError) << "Type attribute `" << name_str << "` is already set for type `"
                                   << TypeIndexToTypeKey(type_index) << "`";
     }
-    column->data_[type_index] = value_view;
+    column->data_[type_index - column->begin_index] = value_view;
   }
   const TVMFFITypeAttrColumn* GetTypeAttrColumn(const TVMFFIByteArray* name) {
     String name_str(*name);
@@ -363,7 +385,9 @@ class TypeTable {
     ReserveDepthOneObjectTypeIndex(StaticTypeKey::kTVMFFIShape, TypeIndex::kTVMFFIShape);
     ReserveDepthOneObjectTypeIndex(StaticTypeKey::kTVMFFITensor, TypeIndex::kTVMFFITensor);
     ReserveDepthOneObjectTypeIndex(StaticTypeKey::kTVMFFIArray, TypeIndex::kTVMFFIArray);
+    ReserveDepthOneObjectTypeIndex(StaticTypeKey::kTVMFFIList, TypeIndex::kTVMFFIList);
     ReserveDepthOneObjectTypeIndex(StaticTypeKey::kTVMFFIMap, TypeIndex::kTVMFFIMap);
+    ReserveDepthOneObjectTypeIndex(StaticTypeKey::kTVMFFIDict, TypeIndex::kTVMFFIDict);
     ReserveDepthOneObjectTypeIndex(StaticTypeKey::kTVMFFIModule, TypeIndex::kTVMFFIModule);
     ReserveDepthOneObjectTypeIndex(StaticTypeKey::kTVMFFIOpaquePyObject,
                                    TypeIndex::kTVMFFIOpaquePyObject);
@@ -439,6 +463,16 @@ class OpaqueObjectImpl : public Object, public TVMFFIOpaqueObjectCell {
  private:
   void (*deleter_)(void* handle);
 };
+
+ObjectRef GetMissingObject() {
+  static ObjectRef missing_obj(make_object<Object>());
+  return missing_obj;
+}
+
+ObjectRef GetKwargsObject() {
+  static ObjectRef kwargs_obj(make_object<Object>());
+  return kwargs_obj;
+}
 
 }  // namespace ffi
 }  // namespace tvm
@@ -553,8 +587,11 @@ namespace {
 TVM_FFI_STATIC_INIT_BLOCK() {
   using namespace tvm::ffi;
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def_method("ffi.GetRegisteredTypeKeys", []() -> Array<String> {
-    return tvm::ffi::TypeTable::Global()->GetRegisteredTypeKeys();
-  });
+  refl::GlobalDef()
+      .def_method(
+          "ffi.GetRegisteredTypeKeys",
+          []() -> Array<String> { return tvm::ffi::TypeTable::Global()->GetRegisteredTypeKeys(); })
+      .def("ffi.GetInvalidObject", GetMissingObject)
+      .def("ffi.GetKwargsObject", GetKwargsObject);
 }
 }  // namespace

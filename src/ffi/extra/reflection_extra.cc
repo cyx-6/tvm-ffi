@@ -21,7 +21,9 @@
  *
  * \brief Extra reflection registrations. *
  */
+#include <tvm/ffi/extra/structural_key.h>
 #include <tvm/ffi/reflection/access_path.h>
+#include <tvm/ffi/reflection/accessor.h>
 #include <tvm/ffi/reflection/registry.h>
 
 namespace tvm {
@@ -78,7 +80,7 @@ void MakeObjectFromPackedArgs(ffi::PackedArgs args, Any* ret) {
         field_info->setter(field_addr, reinterpret_cast<const TVMFFIAny*>(&field_value));
         keys_found[arg_index] = true;
       } else if (field_info->flags & kTVMFFIFieldFlagBitMaskHasDefault) {
-        field_info->setter(field_addr, &(field_info->default_value));
+        reflection::SetFieldToDefault(field_info, field_addr);
       } else {
         TVM_FFI_THROW(TypeError) << "Required field `"
                                  << String(field_info->name.data, field_info->name.size)
@@ -106,7 +108,7 @@ void MakeObjectFromPackedArgs(ffi::PackedArgs args, Any* ret) {
 inline void AccessStepRegisterReflection() {
   // register access step reflection here since it is only needed for bindings
   namespace refl = tvm::ffi::reflection;
-  refl::ObjectDef<AccessStepObj>()
+  refl::ObjectDef<AccessStepObj>(refl::init(false))
       .def_ro("kind", &AccessStepObj::kind)
       .def_ro("key", &AccessStepObj::key);
 }
@@ -114,7 +116,7 @@ inline void AccessStepRegisterReflection() {
 inline void AccessPathRegisterReflection() {
   // register access path reflection here since it is only needed for bindings
   namespace refl = tvm::ffi::reflection;
-  refl::ObjectDef<AccessPathObj>()
+  refl::ObjectDef<AccessPathObj>(refl::init(false))
       .def_ro("parent", &AccessPathObj::parent)
       .def_ro("step", &AccessPathObj::step)
       .def_ro("depth", &AccessPathObj::depth)
@@ -132,11 +134,46 @@ inline void AccessPathRegisterReflection() {
            [](const AccessPath& self, const AccessPath& other) { return self->PathEqual(other); });
 }
 
+int64_t StructuralKeyHash(const Any& key) {
+  const auto* key_obj = key.as<StructuralKeyObj>();
+  TVM_FFI_ICHECK_NOTNULL(key_obj);
+  return key_obj->hash_i64;
+}
+
+bool StructuralKeyEqual(const Any& lhs, const Any& rhs) {
+  if (lhs.same_as(rhs)) {
+    return true;
+  }
+  const auto* lhs_obj = lhs.as<StructuralKeyObj>();
+  const auto* rhs_obj = rhs.as<StructuralKeyObj>();
+  TVM_FFI_ICHECK_NOTNULL(lhs_obj);
+  TVM_FFI_ICHECK_NOTNULL(rhs_obj);
+  if (lhs_obj->hash_i64 != rhs_obj->hash_i64) {
+    return false;
+  }
+  return StructuralEqual::Equal(lhs_obj->key, rhs_obj->key);
+}
+
+inline void StructuralKeyRegisterReflection() {
+  namespace refl = tvm::ffi::reflection;
+  refl::ObjectDef<StructuralKeyObj>()
+      .def_ro("key", &StructuralKeyObj::key)
+      .def_ro("hash_i64", &StructuralKeyObj::hash_i64);
+  refl::TypeAttrDef<StructuralKeyObj>()
+      .attr("__any_hash__", reinterpret_cast<void*>(&StructuralKeyHash))
+      .attr("__any_equal__", reinterpret_cast<void*>(&StructuralKeyEqual));
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   AccessStepRegisterReflection();
   AccessPathRegisterReflection();
-  refl::GlobalDef().def_packed("ffi.MakeObjectFromPackedArgs", MakeObjectFromPackedArgs);
+  StructuralKeyRegisterReflection();
+
+  refl::GlobalDef()
+      .def_packed("ffi.MakeObjectFromPackedArgs", MakeObjectFromPackedArgs)
+      .def("ffi.StructuralKey", [](Any key) { return StructuralKey(std::move(key)); })
+      .def("ffi.StructuralKeyEqual", StructuralKeyEqual);
 }
 
 }  // namespace reflection

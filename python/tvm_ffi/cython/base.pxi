@@ -151,6 +151,8 @@ cdef extern from "tvm/ffi/c_api.h":
         kTVMFFIMap = 72
         kTVMFFIModule = 73
         kTVMFFIOpaquePyObject = 74
+        kTVMFFIList = 75
+        kTVMFFIDict = 76
 
     ctypedef void* TVMFFIObjectHandle
 
@@ -202,6 +204,9 @@ cdef extern from "tvm/ffi/c_api.h":
         kTVMFFIFieldFlagBitMaskWritable = 1 << 0
         kTVMFFIFieldFlagBitMaskHasDefault = 1 << 1
         kTVMFFIFieldFlagBitMaskIsStaticMethod = 1 << 2
+        kTVMFFIFieldFlagBitMaskDefaultFromFactory = 1 << 5
+        kTVMFFIFieldFlagBitMaskInitOff = 1 << 9
+        kTVMFFIFieldFlagBitMaskKwOnly = 1 << 10
 
     ctypedef int (*TVMFFIFieldGetter)(void* field, TVMFFIAny* result) noexcept
     ctypedef int (*TVMFFIFieldSetter)(void* field, const TVMFFIAny* value) noexcept
@@ -217,7 +222,7 @@ cdef extern from "tvm/ffi/c_api.h":
         int64_t offset
         TVMFFIFieldGetter getter
         TVMFFIFieldSetter setter
-        TVMFFIAny default_value
+        TVMFFIAny default_value_or_factory
         int32_t field_static_type_index
 
     ctypedef struct TVMFFIMethodInfo:
@@ -246,7 +251,8 @@ cdef extern from "tvm/ffi/c_api.h":
 
     ctypedef struct TVMFFITypeAttrColumn:
         const TVMFFIAny* data
-        size_t size
+        int32_t size
+        int32_t begin_index
 
     int TVMFFIObjectDecRef(TVMFFIObjectHandle obj) nogil
     int TVMFFIObjectIncRef(TVMFFIObjectHandle obj) nogil
@@ -392,6 +398,7 @@ cdef extern from "tvm_ffi_python_helpers.h":
 
 
 cdef class ByteArrayArg:
+    __slots__ = ()
     cdef TVMFFIByteArray cdata
     cdef object py_data
 

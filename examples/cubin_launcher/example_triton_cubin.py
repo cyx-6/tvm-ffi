@@ -35,8 +35,8 @@ import sys
 import traceback
 
 import torch
-import triton  # type: ignore[import-not-found]
-import triton.language as tl  # type: ignore[import-not-found]
+import triton
+import triton.language as tl
 from tvm_ffi import cpp
 
 
@@ -55,7 +55,7 @@ def generate_cubin() -> bytes:
     # [triton_kernel.begin]
     # Define the kernel dynamically
     @triton.jit
-    def square_kernel(X_ptr, Y_ptr, n, BLOCK: tl.constexpr = 1024):  # noqa
+    def square_kernel(X_ptr, Y_ptr, n, BLOCK: tl.constexpr = 1024):  # noqa  # ty: ignore[invalid-parameter-default]
         pid = tl.program_id(0)
         start = pid * BLOCK
         offsets = start + tl.arange(0, BLOCK)
@@ -67,13 +67,7 @@ def generate_cubin() -> bytes:
     # Trigger kernel compilation by doing a dummy call
     x_dummy = torch.ones(1024, dtype=torch.float32, device="cuda")
     y_dummy = torch.empty(1024, dtype=torch.float32, device="cuda")
-    square_kernel[1, 1](x_dummy, y_dummy, 1024)
-
-    # Extract compiled CUBIN from the device cache
-    device_caches = square_kernel.device_caches
-    device_id = next(iter(device_caches.keys()))
-    cache_tuple = device_caches[device_id]
-    compiled_kernel = next(iter(cache_tuple[0].values()))
+    compiled_kernel = square_kernel[1, 1](x_dummy, y_dummy, 1024)
 
     # Get CUBIN bytes
     cubin_bytes = compiled_kernel.kernel
