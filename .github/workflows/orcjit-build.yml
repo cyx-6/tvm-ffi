@@ -49,39 +49,42 @@ jobs:
       - name: Install LLVM and clang
         shell: bash -el {0}
         run: |
-          which python
-          conda activate build
-          which python
           conda install -y -c conda-forge zlib zstd-static llvmdev=22.1.0 clangdev=22.1.0
           echo "CC=$CONDA/envs/build/bin/clang" >> $GITHUB_ENV
           echo "CXX=$CONDA/envs/build/bin/clang++" >> $GITHUB_ENV
 
       - name: Install tvm-ffi (core package)
+        shell: bash -el {0}
         run: |
           pip install -e .
 
       - name: Build and install tvm-ffi-orcjit
         working-directory: addons/tvm-ffi-orcjit
+        shell: bash -el {0}
         run: |
           pip install -e .
 
       - name: Install test dependencies
+        shell: bash -el {0}
         run: |
           conda install pytest
 
       - name: Build test object files
         working-directory: addons/tvm-ffi-orcjit/tests
+        shell: bash -el {0}
         run: |
           cmake -B build
           cmake --build build --target install
 
       - name: Run tests
         working-directory: addons/tvm-ffi-orcjit
+        shell: bash -el {0}
         run: |
           pytest tests/ -v
 
       - name: Run example
         working-directory: addons/tvm-ffi-orcjit/examples/quick-start
+        shell: bash -el {0}
         run: |
           cmake -B build
           cmake --build build
