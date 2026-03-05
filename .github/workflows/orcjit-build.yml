@@ -48,6 +48,9 @@ jobs:
       - name: Install LLVM and clang
         run: |
           conda install -y -c conda-forge zlib zstd-static llvmdev=22.1.0 clangdev=22.1.0
+          ls $CONDA
+          ls $CONDA/envs
+          ls $CONDA/envs/build
           ls $CONDA/envs/build/bin
           echo "CC=$CONDA/envs/build/bin/clang" >> $GITHUB_ENV
           echo "CXX=$CONDA/envs/build/bin/clang++" >> $GITHUB_ENV
