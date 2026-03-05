@@ -62,7 +62,8 @@ jobs:
         working-directory: addons/tvm-ffi-orcjit
         shell: bash -el {0}
         run: |
-          pip install -e .
+          pip install scikit-build-core
+          pip install --no-build-isolation -e .
 
       - name: Install test dependencies
         shell: bash -el {0}
