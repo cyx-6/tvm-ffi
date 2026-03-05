@@ -39,51 +39,41 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ['3.9']
+        python-version: ['3.12']
 
     steps:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: conda-incubator/setup-miniconda@v3
         with:
+          miniconda-version: "latest"
+          activate-environment: build
           python-version: ${{ matrix.python-version }}
 
-      - name: Install LLVM (Ubuntu)
-        if: runner.os == 'Linux'
+      - name: Install LLVM and clang
+        shell: bash -el {0}
         run: |
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          echo "CC=clang-18" >> $GITHUB_ENV
-          echo "CXX=clang++-18" >> $GITHUB_ENV
-
-      - name: Install LLVM (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install llvm@18
-          echo "LLVM_DIR=$(brew --prefix llvm@18)" >> $GITHUB_ENV
-          echo "CC=$(brew --prefix llvm@18)/bin/clang" >> $GITHUB_ENV
-          echo "CXX=$(brew --prefix llvm@18)/bin/clang++" >> $GITHUB_ENV
-          echo "PATH=$(brew --prefix llvm@18)/bin:$PATH" >> $GITHUB_ENV
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
+          conda install -y -c conda-forge llvmdev=22.1.0 clangdev=22.1.0
+          echo "CC=$CONDA/envs/build/bin/clang" >> $GITHUB_ENV
+          echo "CXX=$CONDA/envs/build/bin/clang++" >> $GITHUB_ENV
 
       - name: Install tvm-ffi (core package)
+        shell: bash -el {0}
         run: |
-          uv pip install -e . --system
+          pip install -e .
 
       - name: Build and install tvm-ffi-orcjit
         working-directory: addons/tvm-ffi-orcjit
+        shell: bash -el {0}
         run: |
-          uv pip install -e . --system
+          pip install -e .
 
       - name: Install test dependencies
+        shell: bash -el {0}
         run: |
-          uv pip install pytest --system
+          pip install pytest
 
       - name: Build test object files
         working-directory: addons/tvm-ffi-orcjit/tests
@@ -93,11 +83,13 @@ jobs:
 
       - name: Run tests
         working-directory: addons/tvm-ffi-orcjit
+        shell: bash -el {0}
         run: |
           pytest tests/ -v
 
       - name: Run example
         working-directory: addons/tvm-ffi-orcjit/examples/quick-start
+        shell: bash -el {0}
         run: |
           cmake -B build
           cmake --build build
