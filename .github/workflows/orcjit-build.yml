@@ -81,19 +81,7 @@ jobs:
         working-directory: addons/tvm-ffi-orcjit
         shell: bash -el {0}
         run: |
-          # Run pytest and capture output; may segfault during cleanup but tests should pass
-          set +e
-          output=$(pytest tests/ -v 2>&1)
-          exit_code=$?
-          echo "$output"
-          # Check if tests passed (ignore cleanup segfaults)
-          if echo "$output" | grep -q "passed"; then
-            echo "Tests passed successfully"
-            exit 0
-          else
-            echo "Tests failed"
-            exit $exit_code
-          fi
+          pytest tests/ -v
 
       - name: Run example
         working-directory: addons/tvm-ffi-orcjit/examples/quick-start
@@ -101,16 +89,4 @@ jobs:
         run: |
           cmake -B build
           cmake --build build
-          # Run example and capture output; may segfault during cleanup
-          set +e
-          output=$(python run.py 2>&1)
-          exit_code=$?
-          echo "$output"
-          # Check if example passed (ignore cleanup segfaults)
-          if echo "$output" | grep -q "All tests passed"; then
-            echo "Example passed successfully"
-            exit 0
-          else
-            echo "Example failed"
-            exit $exit_code
-          fi
+          python run.py

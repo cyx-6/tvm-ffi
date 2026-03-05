@@ -25,11 +25,11 @@ on:
       - orcjit
     paths:
       - 'addons/tvm-ffi-orcjit/**'
-      - '.github/workflows/tvm-ffi-orcjit/ci_test.yml'
+      - '.github/workflows/orcjit-tests.yml'
   pull_request:
     paths:
       - 'addons/tvm-ffi-orcjit/**'
-      - '.github/workflows/tvm-ffi-orcjit/ci_test.yml'
+      - '.github/workflows/orcjit-tests.yml'
   workflow_dispatch:
 
 jobs:
@@ -59,14 +59,15 @@ jobs:
           sudo ./llvm.sh 18
           echo "CC=clang-18" >> $GITHUB_ENV
           echo "CXX=clang++-18" >> $GITHUB_ENV
+          echo "LLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm" >> $GITHUB_ENV
 
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install llvm@18
-          echo "LLVM_DIR=$(brew --prefix llvm@18)" >> $GITHUB_ENV
-          echo "CC=$(brew --prefix llvm@18)/bin/clang" >> $GITHUB_ENV
-          echo "CXX=$(brew --prefix llvm@18)/bin/clang++" >> $GITHUB_ENV
+          # Use system clang for compilation to avoid libc++ header conflicts
+          # Only set LLVM_DIR and PATH so CMake can find LLVM libraries
+          echo "LLVM_DIR=$(brew --prefix llvm@18)/lib/cmake/llvm" >> $GITHUB_ENV
           echo "PATH=$(brew --prefix llvm@18)/bin:$PATH" >> $GITHUB_ENV
 
       - name: Install uv
@@ -79,7 +80,8 @@ jobs:
       - name: Build and install tvm-ffi-orcjit
         working-directory: addons/tvm-ffi-orcjit
         run: |
-          uv pip install -e . --system
+          uv pip install scikit-build-core --system
+          uv pip install --no-build-isolation --no-deps -e . --system
 
       - name: Install test dependencies
         run: |
