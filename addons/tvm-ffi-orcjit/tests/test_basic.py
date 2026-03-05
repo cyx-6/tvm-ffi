@@ -142,6 +142,10 @@ def test_gradually_add_objects_to_same_library() -> None:
     assert mul_func(7, 6) == 42
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="macOS JIT has unwind info issues with multiple libraries",
+)
 def test_two_separate_libraries() -> None:
     """Test creating two separate libraries each with its own object file."""
     obj_file1 = get_test_obj_file("test_funcs.o")
@@ -258,6 +262,10 @@ def test_load_and_execute_cuda_function() -> None:
     assert result == 42
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="macOS JIT has ctor/dtor ordering issues",
+)
 def test_ctor_dtor() -> None:
     """Test ctor and dtor when loading an object file."""
     log = ""

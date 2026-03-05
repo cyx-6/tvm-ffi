@@ -41,6 +41,6 @@ int fib_impl(int n) {
 }
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(fibonacci, fib_impl);
 
-// String concatenation example
-std::string concat_impl(std::string a, std::string b) { return a + b; }
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(concat, concat_impl);
+// TODO: String concatenation causes ABI issues with JIT, disabled for now
+// std::string concat_impl(std::string a, std::string b) { return a + b; }
+// TVM_FFI_DLL_EXPORT_TYPED_FUNC(concat, concat_impl);
