@@ -24,10 +24,19 @@
 
 #include "orcjit_session.h"
 
+#include <llvm/Config/llvm-config.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/Shared/ExecutorAddress.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
+
+// LLVM 20+ changed Symbol::getName() to return std::optional<StringRef>
+// instead of StringRef directly
+#if LLVM_VERSION_MAJOR >= 20
+#define TVM_FFI_LLVM_GET_SYMBOL_NAME(sym) ((*sym.getName()).str())
+#else
+#define TVM_FFI_LLVM_GET_SYMBOL_NAME(sym) (sym.getName().str())
+#endif
 #include <tvm/ffi/cast.h>
 #include <tvm/ffi/error.h>
 #include <tvm/ffi/object.h>
@@ -83,7 +92,7 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
             if (Target.hasName()) {
               session_->AddPendingInitializer(
                   &jit_dylib,
-                  {(*Target.getName()).str(), llvm::orc::ExecutorAddr(0),
+                  {TVM_FFI_LLVM_GET_SYMBOL_NAME(Target), llvm::orc::ExecutorAddr(0),
                    has_priority
                        ? ORCJITExecutionSessionObj::InitFiniEntry::Section::kInitArrayWithPriority
                        : ORCJITExecutionSessionObj::InitFiniEntry::Section::kInitArray,
@@ -94,7 +103,7 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
           ITERATE_SECTION_PER_EDGE(Section, Block, Edge, Target, {
             if (Target.hasName()) {
               session_->AddPendingInitializer(
-                  &jit_dylib, {(*Target.getName()).str(), llvm::orc::ExecutorAddr(0),
+                  &jit_dylib, {TVM_FFI_LLVM_GET_SYMBOL_NAME(Target), llvm::orc::ExecutorAddr(0),
                                ORCJITExecutionSessionObj::InitFiniEntry::Section::kInit, 0});
             }
           });
@@ -107,7 +116,7 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
             if (Target.hasName()) {
               session_->AddPendingDeinitializer(
                   &jit_dylib,
-                  {(*Target.getName()).str(), llvm::orc::ExecutorAddr(0),
+                  {TVM_FFI_LLVM_GET_SYMBOL_NAME(Target), llvm::orc::ExecutorAddr(0),
                    has_priority
                        ? ORCJITExecutionSessionObj::InitFiniEntry::Section::kFiniArrayWithPriority
                        : ORCJITExecutionSessionObj::InitFiniEntry::Section::kFiniArray,
@@ -118,7 +127,7 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
           ITERATE_SECTION_PER_EDGE(Section, Block, Edge, Target, {
             if (Target.hasName()) {
               session_->AddPendingDeinitializer(
-                  &jit_dylib, {(*Target.getName()).str(), llvm::orc::ExecutorAddr(0),
+                  &jit_dylib, {TVM_FFI_LLVM_GET_SYMBOL_NAME(Target), llvm::orc::ExecutorAddr(0),
                                ORCJITExecutionSessionObj::InitFiniEntry::Section::kFini, 0});
             }
           });
