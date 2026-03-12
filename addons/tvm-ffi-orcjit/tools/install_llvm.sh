@@ -36,5 +36,5 @@ cmake -S "zstd-${ZSTD_VERSION}/build/cmake" -B _zstd_build \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
   -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_STATIC=ON \
   -DZSTD_BUILD_PROGRAMS=OFF
-cmake --build _zstd_build --target install -j"$(nproc)"
+cmake --build _zstd_build --target install -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 rm -rf "zstd-${ZSTD_VERSION}" _zstd_build

@@ -26,6 +26,10 @@ using namespace tvm::ffi;
 using ctor_t = void (*)();
 using dtor_t = void (*)();
 
+// These work on all platforms:
+// ELF → .init_array / .fini_array
+// Mach-O → __DATA,__mod_init_func / __cxa_atexit
+// COFF → .CRT$XC* / atexit
 __attribute__((constructor)) void init_array() { PUTS_LOG("<init_array>"); }
 
 __attribute__((constructor(101))) void init_array_101() { PUTS_LOG("<init_array.101>"); }
@@ -33,6 +37,17 @@ __attribute__((constructor(101))) void init_array_101() { PUTS_LOG("<init_array.
 __attribute__((constructor(102))) void init_array_102() { PUTS_LOG("<init_array.102>"); }
 __attribute__((constructor(103))) void init_array_103() { PUTS_LOG("<init_array.103>"); }
 
+__attribute__((destructor)) void fini_array() { PUTS_LOG("<fini_array>"); }
+
+__attribute__((destructor(101))) void fini_array_101() { PUTS_LOG("<fini_array.101>"); }
+
+__attribute__((destructor(102))) void fini_array_102() { PUTS_LOG("<fini_array.102>"); }
+
+__attribute__((destructor(103))) void fini_array_103() { PUTS_LOG("<fini_array.103>"); }
+
+// ELF-specific: explicit .ctors/.dtors section placements with priorities.
+// These sections don't exist on Mach-O or COFF.
+#ifdef __ELF__
 static void ctors() { PUTS_LOG("<ctors>"); }
 __attribute__((section(".ctors"), used)) static ctor_t ctors_ptr = ctors;
 
@@ -45,13 +60,6 @@ __attribute__((section(".ctors.102"), used)) static ctor_t ctors_2_ptr = ctors_1
 static void ctors_103() { PUTS_LOG("<ctors.103>"); }
 __attribute__((section(".ctors.103"), used)) static ctor_t ctors_3_ptr = ctors_103;
 
-__attribute__((destructor)) void fini_array() { PUTS_LOG("<fini_array>"); }
-
-__attribute__((destructor(101))) void fini_array_101() { PUTS_LOG("<fini_array.101>"); }
-
-__attribute__((destructor(102))) void fini_array_102() { PUTS_LOG("<fini_array.102>"); }
-
-__attribute__((destructor(103))) void fini_array_103() { PUTS_LOG("<fini_array.103>"); }
 static void dtors() { PUTS_LOG("<dtors>"); }
 __attribute__((section(".dtors"), used)) static dtor_t dtors_ptr = dtors;
 
@@ -63,6 +71,7 @@ __attribute__((section(".dtors.102"), used)) static dtor_t dtors_2_ptr = dtors_1
 
 static void dtors_103() { PUTS_LOG("<dtors.103>"); }
 __attribute__((section(".dtors.103"), used)) static dtor_t dtors_3_ptr = dtors_103;
+#endif  // __ELF__
 
 void main_impl() { PUTS_LOG("<main>"); }
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(main, main_impl);

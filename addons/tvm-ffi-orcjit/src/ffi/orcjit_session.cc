@@ -69,8 +69,14 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
     Config.PrePrunePasses.emplace_back([](llvm::jitlink::LinkGraph& G) {
       for (auto& Section : G.sections()) {
         auto section_name = Section.getName();
+        // ELF: .init_array*, .fini_array*, .ctors*, .dtors*
+        // Mach-O: __DATA,__mod_init_func, __DATA,__mod_term_func
+        // COFF: .CRT$XC* (ctors), .CRT$XT* (dtors)
         if (section_name.starts_with(".init_array") || section_name.starts_with(".fini_array") ||
-            section_name.starts_with(".ctors") || section_name.starts_with(".dtors")) {
+            section_name.starts_with(".ctors") || section_name.starts_with(".dtors") ||
+            section_name == "__DATA,__mod_init_func" ||
+            section_name == "__DATA,__mod_term_func" ||
+            section_name.starts_with(".CRT$XC") || section_name.starts_with(".CRT$XT")) {
           for (auto* Block : Section.blocks()) {
             for (auto* Sym : G.defined_symbols()) {
               if (&Sym->getBlock() == Block) {
@@ -86,15 +92,29 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
       return llvm::Error::success();
     });
     // After fixups, read resolved function pointers from all init/fini data sections.
+    // Handles ELF (.init_array, .ctors, .fini_array, .dtors),
+    // Mach-O (__DATA,__mod_init_func, __DATA,__mod_term_func),
+    // and COFF (.CRT$XC*, .CRT$XT*) section conventions.
     Config.PostFixupPasses.emplace_back([this, &jit_dylib](llvm::jitlink::LinkGraph& G) {
       using Entry = ORCJITExecutionSessionObj::InitFiniEntry;
       for (auto& Sec : G.sections()) {
         auto section_name = Sec.getName();
+
+        // --- ELF sections ---
         bool is_init_array = section_name.starts_with(".init_array");
         bool is_ctors = section_name.starts_with(".ctors");
         bool is_fini_array = section_name.starts_with(".fini_array");
         bool is_dtors = section_name.starts_with(".dtors");
-        if (!is_init_array && !is_ctors && !is_fini_array && !is_dtors) continue;
+        // --- Mach-O sections ---
+        bool is_mod_init = (section_name == "__DATA,__mod_init_func");
+        bool is_mod_term = (section_name == "__DATA,__mod_term_func");
+        // --- COFF sections ---
+        bool is_crt_xc = section_name.starts_with(".CRT$XC");
+        bool is_crt_xt = section_name.starts_with(".CRT$XT");
+
+        if (!is_init_array && !is_ctors && !is_fini_array && !is_dtors && !is_mod_init &&
+            !is_mod_term && !is_crt_xc && !is_crt_xt)
+          continue;
 
         int priority = 0;
         Entry::Section sec;
@@ -118,12 +138,49 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
           }
           sec = Entry::Section::kFiniArray;
           is_init = false;
-        } else {
+        } else if (is_dtors) {
           if (section_name.consume_front(".dtors.")) {
             section_name.getAsInteger(10, priority);
           }
           sec = Entry::Section::kDtors;
           is_init = false;
+        } else if (is_mod_init) {
+          // Mach-O __mod_init_func: no priority system, treated as init_array
+          sec = Entry::Section::kInitArray;
+          is_init = true;
+        } else if (is_mod_term) {
+          // Mach-O __mod_term_func: no priority system, treated as fini_array
+          sec = Entry::Section::kFiniArray;
+          is_init = false;
+        } else if (is_crt_xc) {
+          // COFF .CRT$XC[suffix]: C++ constructors, sorted alphabetically by suffix.
+          // Convert suffix to integer priority that preserves alphabetical ordering.
+          // E.g., .CRT$XCA → 'A'*100000=6500000, .CRT$XCU → 'U'*100000=8500000,
+          //        .CRT$XCT00200 → 'T'*100000+200=8400200
+          sec = Entry::Section::kInitArray;
+          is_init = true;
+          auto suffix = section_name.substr(7);  // after ".CRT$XC"
+          if (!suffix.empty()) {
+            priority = static_cast<int>(suffix[0]) * 100000;
+            if (suffix.size() > 1) {
+              int num = 0;
+              suffix.substr(1).getAsInteger(10, num);
+              priority += num;
+            }
+          }
+        } else {
+          // COFF .CRT$XT[suffix]: C++ destructors, same suffix-to-priority scheme.
+          sec = Entry::Section::kFiniArray;
+          is_init = false;
+          auto suffix = section_name.substr(7);  // after ".CRT$XT"
+          if (!suffix.empty()) {
+            priority = static_cast<int>(suffix[0]) * 100000;
+            if (suffix.size() > 1) {
+              int num = 0;
+              suffix.substr(1).getAsInteger(10, num);
+              priority += num;
+            }
+          }
         }
 
         for (auto* Block : Sec.blocks()) {

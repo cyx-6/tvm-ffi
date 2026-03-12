@@ -78,25 +78,39 @@ message(STATUS "LLVM static ldflags: ${_llvm_static_ldflags}")
 separate_arguments(_llvm_static_libs_list NATIVE_COMMAND "${_llvm_static_libs}")
 separate_arguments(_llvm_static_ldflags_list NATIVE_COMMAND "${_llvm_static_ldflags}")
 
-# Find static zlib and zstd to avoid runtime dependencies on target systems.
-# This enables manylinux_2_28 compatibility.
-cmake_path(GET LLVM_DIR PARENT_PATH _llvm_prefix)
-cmake_path(GET _llvm_prefix PARENT_PATH _llvm_prefix)
-cmake_path(GET _llvm_prefix PARENT_PATH _llvm_prefix)
-find_library(ZLIB_STATIC NAMES libz.a HINTS "${_llvm_prefix}/lib" REQUIRED)
-find_library(ZSTD_STATIC NAMES libzstd.a HINTS "${_llvm_prefix}/lib" "${_llvm_prefix}/lib64" REQUIRED)
-message(STATUS "Static zlib: ${ZLIB_STATIC}")
-message(STATUS "Static zstd: ${ZSTD_STATIC}")
-
-target_link_libraries(
-  tvm_ffi_orcjit
-  PRIVATE tvm_ffi::header tvm_ffi::shared ${_llvm_static_ldflags_list}
-          ${_llvm_static_libs_list} ${ZLIB_STATIC} ${ZSTD_STATIC}
-)
-
-# Statically link libstdc++ and libgcc to avoid GLIBCXX version requirements
-# on the target system, enabling manylinux_2_28 support.
-target_link_options(tvm_ffi_orcjit PRIVATE -static-libstdc++ -static-libgcc)
+if(APPLE)
+  # On macOS, use llvm-config --system-libs to get system dependencies (zlib, zstd, etc.)
+  execute_process(
+    COMMAND ${LLVM_CONFIG_EXE} --link-static --system-libs
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    OUTPUT_VARIABLE _llvm_system_libs
+  )
+  message(STATUS "LLVM system libs: ${_llvm_system_libs}")
+  separate_arguments(_llvm_system_libs_list NATIVE_COMMAND "${_llvm_system_libs}")
+  target_link_libraries(
+    tvm_ffi_orcjit
+    PRIVATE tvm_ffi::header tvm_ffi::shared ${_llvm_static_ldflags_list}
+            ${_llvm_static_libs_list} ${_llvm_system_libs_list}
+  )
+elseif(UNIX)
+  # On Linux, find static zlib and zstd to avoid runtime dependencies on target systems.
+  # This enables manylinux_2_28 compatibility.
+  cmake_path(GET LLVM_DIR PARENT_PATH _llvm_prefix)
+  cmake_path(GET _llvm_prefix PARENT_PATH _llvm_prefix)
+  cmake_path(GET _llvm_prefix PARENT_PATH _llvm_prefix)
+  find_library(ZLIB_STATIC NAMES libz.a HINTS "${_llvm_prefix}/lib" REQUIRED)
+  find_library(ZSTD_STATIC NAMES libzstd.a HINTS "${_llvm_prefix}/lib" "${_llvm_prefix}/lib64" REQUIRED)
+  message(STATUS "Static zlib: ${ZLIB_STATIC}")
+  message(STATUS "Static zstd: ${ZSTD_STATIC}")
+  target_link_libraries(
+    tvm_ffi_orcjit
+    PRIVATE tvm_ffi::header tvm_ffi::shared ${_llvm_static_ldflags_list}
+            ${_llvm_static_libs_list} ${ZLIB_STATIC} ${ZSTD_STATIC}
+  )
+  # Statically link libstdc++ and libgcc to avoid GLIBCXX version requirements
+  # on the target system, enabling manylinux_2_28 support.
+  target_link_options(tvm_ffi_orcjit PRIVATE -static-libstdc++ -static-libgcc)
+endif()
 
 # ---- Find and bundle liborc_rt ----
 # Allow overriding via env: CLANG_PATH
