@@ -233,9 +233,15 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
   } else {
     jit_ = std::move(call_llvm(llvm::orc::LLJITBuilder().create(), "Failed to create LLJIT"));
   }
+#ifndef __APPLE__
+  // Linux/COFF: use our custom InitFiniPlugin for .ctors/.dtors/.init_array/.fini_array
+  // priority handling and explicit section collection.
+  // macOS: MachOPlatform has its own JITLink plugin that handles __mod_init_func
+  // and __cxa_atexit natively; we use jit_->initialize()/deinitialize() instead.
   auto& objlayer = jit_->getObjLinkingLayer();
   static_cast<llvm::orc::ObjectLinkingLayer&>(objlayer).addPlugin(
       std::make_unique<InitFiniPlugin>(GetRef<ORCJITExecutionSession>(this)));
+#endif
 }
 
 ORCJITExecutionSession::ORCJITExecutionSession(const std::string& orc_rt_path) {
