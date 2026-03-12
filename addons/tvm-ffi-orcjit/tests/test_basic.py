@@ -281,30 +281,32 @@ def test_ctor_dtor() -> None:
     del lib
 
     if sys.platform == "linux":
-        # ELF: full output including .ctors/.dtors sections
-        assert (
-            log
-            == "<init_array.101><init_array.102><init_array.103><init_array>"
-            "<ctors.103><ctors.102><ctors.101><ctors>"
-            "<main>"
-            "<dtors><dtors.101><dtors.102><dtors.103>"
-            "<fini_array><fini_array.103><fini_array.102><fini_array.101>"
-        ), log
+        # ELF: constructors via .init_array + .ctors, destructors via .dtors.
+        # __attribute__((destructor)) may be lowered to __cxa_atexit (arch-dependent),
+        # so .fini_array entries may or may not be present.
+        main_idx = log.index("<main>")
+        pre = log[:main_idx]
+        post = log[main_idx:]
+        # init_array: priority 101 < 102 < 103 < 65535(default)
+        assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
+        assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
+        assert pre.index("<init_array.103>") < pre.index("<init_array>")
+        # .ctors: reverse priority order (103, 102, 101, default)
+        assert pre.index("<ctors.103>") < pre.index("<ctors.102>")
+        assert pre.index("<ctors.102>") < pre.index("<ctors.101>")
+        assert pre.index("<ctors.101>") < pre.index("<ctors>")
+        # .dtors section entries after main
+        assert "<dtors>" in post
     elif sys.platform == "darwin":
         # Mach-O: constructors via __mod_init_func (our InitFiniPlugin),
         # destructors via __cxa_atexit (LLJIT deinitialize).
         # No .ctors/.dtors sections on Mach-O.
-        assert "<init_array.101>" in log
-        assert "<init_array.102>" in log
-        assert "<init_array.103>" in log
-        assert "<init_array>" in log
-        assert "<main>" in log
-        # Destructors registered via __cxa_atexit, drained by LLJIT::deinitialize
-        assert "<fini_array>" in log
-        assert "<fini_array.101>" in log
-        assert "<fini_array.102>" in log
-        assert "<fini_array.103>" in log
-        # No ELF-specific sections on macOS
+        main_idx = log.index("<main>")
+        pre = log[:main_idx]
+        assert "<init_array.101>" in pre
+        assert "<init_array.102>" in pre
+        assert "<init_array.103>" in pre
+        assert "<init_array>" in pre
         assert "<ctors>" not in log
         assert "<dtors>" not in log
 

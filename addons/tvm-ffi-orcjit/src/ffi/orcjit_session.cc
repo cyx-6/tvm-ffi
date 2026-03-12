@@ -119,9 +119,14 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
         int priority = 0;
         Entry::Section sec;
         bool is_init;
+        // ELF default priority for sections without a numeric suffix is 65535.
+        // Lower priority numbers run first for .init_array; .fini_array and .ctors
+        // negate so that higher-numbered entries run first (reverse order).
         if (is_init_array) {
           if (section_name.consume_front(".init_array.")) {
             section_name.getAsInteger(10, priority);
+          } else {
+            priority = 65535;
           }
           sec = Entry::Section::kInitArray;
           is_init = true;
@@ -135,6 +140,8 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
           if (section_name.consume_front(".fini_array.") &&
               !section_name.getAsInteger(10, priority)) {
             priority = -priority;
+          } else {
+            priority = -65535;
           }
           sec = Entry::Section::kFiniArray;
           is_init = false;
