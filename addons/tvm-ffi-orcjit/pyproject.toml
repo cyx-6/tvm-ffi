@@ -79,4 +79,4 @@ repair-wheel-command = "auditwheel repair --exclude libtvm_ffi.so -w {dest_dir} 
 
 [tool.cibuildwheel.macos]
 environment = { LLVM_VERSION = "22.1.0", CMAKE_PREFIX_PATH = "/opt/llvm", LLVM_CONFIG_PATH = "/opt/llvm/bin/llvm-config", CLANG_PATH = "/opt/llvm/bin/clang" }
-repair-wheel-command = "delocate-wheel --exclude libtvm_ffi.dylib -w {dest_dir} -v {wheel}"
+repair-wheel-command = "delocate-wheel --ignore-missing-dependencies --exclude libtvm_ffi.dylib -w {dest_dir} -v {wheel}"
