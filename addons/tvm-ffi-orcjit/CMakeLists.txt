@@ -104,6 +104,16 @@ target_link_libraries(
   PRIVATE tvm_ffi::header tvm_ffi::shared ${_llvm_static_ldflags_list}
           ${_llvm_static_libs_list} ${ZLIB_STATIC} ${ZSTD_STATIC}
 )
+if(WIN32)
+  # LLVM on Windows needs ntdll (for RtlGetLastNtStatus) and other system libs
+  execute_process(
+    COMMAND ${LLVM_CONFIG_EXE} --link-static --system-libs
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    OUTPUT_VARIABLE _llvm_system_libs
+  )
+  separate_arguments(_llvm_system_libs_list NATIVE_COMMAND "${_llvm_system_libs}")
+  target_link_libraries(tvm_ffi_orcjit PRIVATE ${_llvm_system_libs_list})
+endif()
 
 if(APPLE)
   # Fix @rpath/libc++.1.dylib (conda-forge) → /usr/lib/libc++.1.dylib (system)
