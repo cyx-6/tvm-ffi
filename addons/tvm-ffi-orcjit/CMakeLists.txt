@@ -105,14 +105,12 @@ target_link_libraries(
           ${_llvm_static_libs_list} ${ZLIB_STATIC} ${ZSTD_STATIC}
 )
 if(WIN32)
-  # LLVM on Windows needs ntdll (for RtlGetLastNtStatus) and other system libs
-  execute_process(
-    COMMAND ${LLVM_CONFIG_EXE} --link-static --system-libs
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    OUTPUT_VARIABLE _llvm_system_libs
+  # LLVM on Windows needs these system libraries.
+  # We link them explicitly rather than using llvm-config --system-libs
+  # because that also includes -lzstd/-lz which conflict with our static libs.
+  target_link_libraries(tvm_ffi_orcjit PRIVATE
+    ntdll psapi shell32 ole32 uuid advapi32 version
   )
-  separate_arguments(_llvm_system_libs_list NATIVE_COMMAND "${_llvm_system_libs}")
-  target_link_libraries(tvm_ffi_orcjit PRIVATE ${_llvm_system_libs_list})
 endif()
 
 if(APPLE)
