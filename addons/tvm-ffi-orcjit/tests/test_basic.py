@@ -298,22 +298,22 @@ def test_ctor_dtor() -> None:
         # .dtors section entries after main
         assert "<dtors>" in post
     elif sys.platform == "darwin":
-        # Mach-O: constructors via __DATA,__mod_init_func (our InitFiniPlugin),
-        # destructors via __cxa_atexit (drained by LLJIT::deinitialize on del lib).
+        # Mach-O: all constructors in __DATA,__mod_init_func (single section),
+        # destructors via __cxa_atexit (drained by MachOPlatform deinitialize).
         # No .ctors/.dtors sections on Mach-O.
+        # Within a single object file, clang emits __mod_init_func entries in
+        # priority order, so ordering assertions hold for single-TU tests.
         main_idx = log.index("<main>")
         pre = log[:main_idx]
         post = log[main_idx:]
-        # constructors before main
-        assert "<init_array.101>" in pre
-        assert "<init_array.102>" in pre
-        assert "<init_array.103>" in pre
-        assert "<init_array>" in pre
-        # destructors after main (via __cxa_atexit, LIFO order)
-        assert "<fini_array>" in post
-        assert "<fini_array.101>" in post
-        assert "<fini_array.102>" in post
-        assert "<fini_array.103>" in post
+        # constructors before main: priority 101 < 102 < 103 < default
+        assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
+        assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
+        assert pre.index("<init_array.103>") < pre.index("<init_array>")
+        # destructors after main: __cxa_atexit LIFO order (reverse of registration)
+        assert post.index("<fini_array>") < post.index("<fini_array.103>")
+        assert post.index("<fini_array.103>") < post.index("<fini_array.102>")
+        assert post.index("<fini_array.102>") < post.index("<fini_array.101>")
         # ELF-only sections absent
         assert "<ctors>" not in log
         assert "<dtors>" not in log
