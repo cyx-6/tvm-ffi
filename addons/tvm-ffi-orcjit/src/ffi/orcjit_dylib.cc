@@ -62,16 +62,16 @@ ORCJITDynamicLibraryObj::ORCJITDynamicLibraryObj(ORCJITExecutionSession session,
 }
 
 ORCJITDynamicLibraryObj::~ORCJITDynamicLibraryObj() {
-#ifdef __APPLE__
-  // macOS: MachOPlatform's deinitialize drains __cxa_atexit handlers
-  // (registered during initialization) via the ORC runtime's dlclose.
+#ifdef __linux__
+  // Linux: run section-based deinitializers (.fini_array, .dtors)
+  // collected by our custom InitFiniPlugin.
+  session_->RunPendingDeinitializers(GetJITDylib());
+#else
+  // macOS/Windows: native platform's deinitialize drains __cxa_atexit/atexit
+  // handlers (registered during initialization) via the ORC runtime.
   if (auto err = jit_->deinitialize(*dylib_)) {
     llvm::consumeError(std::move(err));
   }
-#else
-  // Linux/COFF: run section-based deinitializers (.fini_array, .dtors)
-  // collected by our custom InitFiniPlugin.
-  session_->RunPendingDeinitializers(GetJITDylib());
 #endif
 }
 
@@ -109,15 +109,15 @@ void* ORCJITDynamicLibraryObj::GetSymbol(const String& name) {
   auto symbol_or_err =
       jit_->getExecutionSession().lookup(search_order, jit_->mangleAndIntern(name.c_str()));
 
-#ifdef __APPLE__
-  // macOS: use MachOPlatform's native init mechanism (handles __mod_init_func
-  // and __cxa_atexit registration). The dlupdate path handles repeated calls.
+#ifdef __linux__
+  // Linux: run initializers collected by our custom InitFiniPlugin.
+  session_->RunPendingInitializers(GetJITDylib());
+#else
+  // macOS/Windows: use native platform's init mechanism (handles __mod_init_func/
+  // .CRT$XC* and __cxa_atexit/atexit registration).
   if (auto err = jit_->initialize(*dylib_)) {
     llvm::consumeError(std::move(err));
   }
-#else
-  // Linux/COFF: run initializers collected by our custom InitFiniPlugin.
-  session_->RunPendingInitializers(GetJITDylib());
 #endif
   // Convert ExecutorAddr to pointer
   return symbol_or_err ? symbol_or_err->getAddress().toPtr<void*>() : nullptr;

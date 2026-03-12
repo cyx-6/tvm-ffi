@@ -25,9 +25,16 @@ from .dylib import DynamicLibrary
 
 
 def _find_orc_rt_library() -> str | None:
-    """Find the bundled liborc_rt library in the same directory as the .so."""
-    for lib_path in _lib_dir.glob("liborc_rt*.a"):
-        return str(lib_path)
+    """Find the bundled liborc_rt library in the same directory as the .so/.dll."""
+    import sys
+
+    if sys.platform == "win32":
+        patterns = ["orc_rt*.lib", "liborc_rt*.a"]
+    else:
+        patterns = ["liborc_rt*.a"]
+    for pattern in patterns:
+        for lib_path in _lib_dir.glob(pattern):
+            return str(lib_path)
     return None
 
 
@@ -58,10 +65,7 @@ class ExecutionSession(Object):
         if orc_rt_path is None:
             orc_rt_path = _find_orc_rt_library()
             if orc_rt_path is None:
-                raise RuntimeError(
-                    "Could not find bundled liborc_rt library. "
-                    "Please reinstall the package or provide the path explicitly."
-                )
+                orc_rt_path = ""
         self.__init_handle_by_constructor__(_ffi_api.ExecutionSession, orc_rt_path)  # type: ignore
 
     def create_library(self, name: str = "") -> DynamicLibrary:

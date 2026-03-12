@@ -83,8 +83,13 @@ separate_arguments(_llvm_static_ldflags_list NATIVE_COMMAND "${_llvm_static_ldfl
 cmake_path(GET LLVM_DIR PARENT_PATH _llvm_prefix)
 cmake_path(GET _llvm_prefix PARENT_PATH _llvm_prefix)
 cmake_path(GET _llvm_prefix PARENT_PATH _llvm_prefix)
-find_library(ZLIB_STATIC NAMES libz.a HINTS "${_llvm_prefix}/lib" REQUIRED)
-find_library(ZSTD_STATIC NAMES libzstd.a HINTS "${_llvm_prefix}/lib" "${_llvm_prefix}/lib64" REQUIRED)
+if(WIN32)
+  find_library(ZLIB_STATIC NAMES zlibstatic z HINTS "${_llvm_prefix}/lib" REQUIRED)
+  find_library(ZSTD_STATIC NAMES zstd_static zstd HINTS "${_llvm_prefix}/lib" REQUIRED)
+else()
+  find_library(ZLIB_STATIC NAMES libz.a HINTS "${_llvm_prefix}/lib" REQUIRED)
+  find_library(ZSTD_STATIC NAMES libzstd.a HINTS "${_llvm_prefix}/lib" "${_llvm_prefix}/lib64" REQUIRED)
+endif()
 message(STATUS "Static zlib: ${ZLIB_STATIC}")
 message(STATUS "Static zstd: ${ZSTD_STATIC}")
 
@@ -100,7 +105,7 @@ if(APPLE)
     COMMAND install_name_tool -change @rpath/libc++.1.dylib /usr/lib/libc++.1.dylib $<TARGET_FILE:tvm_ffi_orcjit>
     COMMENT "Fixing libc++ rpath to use system library"
   )
-elseif(UNIX)
+elseif(UNIX AND NOT WIN32)
   # Statically link libstdc++ and libgcc to avoid GLIBCXX version requirements
   # on the target system, enabling manylinux_2_28 support.
   target_link_options(tvm_ffi_orcjit PRIVATE -static-libstdc++ -static-libgcc)
@@ -134,39 +139,56 @@ cmake_host_system_information(RESULT _host_arch QUERY OS_PLATFORM)
 set(ORC_RT_PATH "")
 
 if(_clang_runtime_dir_rc EQUAL 0 AND _clang_runtime_dir)
-  # Try arch-specific name in the exact directory first
-  if(EXISTS "${_clang_runtime_dir}/liborc_rt-${_host_arch}.a")
-    set(ORC_RT_PATH "${_clang_runtime_dir}/liborc_rt-${_host_arch}.a")
-  elseif(EXISTS "${_clang_runtime_dir}/liborc_rt.a")
-    set(ORC_RT_PATH "${_clang_runtime_dir}/liborc_rt.a")
+  if(WIN32)
+    # Windows: look for orc_rt*.lib
+    file(GLOB_RECURSE _orc_rt_candidates "${_clang_runtime_dir}/orc_rt*.lib")
+    if(NOT _orc_rt_candidates)
+      cmake_path(GET _clang_runtime_dir PARENT_PATH _clang_runtime_parent)
+      if(EXISTS "${_clang_runtime_parent}")
+        file(GLOB_RECURSE _orc_rt_candidates "${_clang_runtime_parent}/orc_rt*.lib")
+      endif()
+    endif()
+    if(_orc_rt_candidates)
+      list(GET _orc_rt_candidates 0 ORC_RT_PATH)
+    endif()
   else()
-    # The reported runtime dir may not exist (e.g. clang reports
-    # aarch64-unknown-linux-gnu/ but files live in linux/). Resolve
-    # the parent and search recursively from there.
-    cmake_path(GET _clang_runtime_dir PARENT_PATH _clang_runtime_parent)
-    if(EXISTS "${_clang_runtime_parent}")
-      file(GLOB_RECURSE _orc_rt_candidates "${_clang_runtime_parent}/liborc_rt*.a")
-      if(_orc_rt_candidates)
-        list(GET _orc_rt_candidates 0 ORC_RT_PATH)
+    # Try arch-specific name in the exact directory first
+    if(EXISTS "${_clang_runtime_dir}/liborc_rt-${_host_arch}.a")
+      set(ORC_RT_PATH "${_clang_runtime_dir}/liborc_rt-${_host_arch}.a")
+    elseif(EXISTS "${_clang_runtime_dir}/liborc_rt.a")
+      set(ORC_RT_PATH "${_clang_runtime_dir}/liborc_rt.a")
+    else()
+      # The reported runtime dir may not exist (e.g. clang reports
+      # aarch64-unknown-linux-gnu/ but files live in linux/). Resolve
+      # the parent and search recursively from there.
+      cmake_path(GET _clang_runtime_dir PARENT_PATH _clang_runtime_parent)
+      if(EXISTS "${_clang_runtime_parent}")
+        file(GLOB_RECURSE _orc_rt_candidates "${_clang_runtime_parent}/liborc_rt*.a")
+        if(_orc_rt_candidates)
+          list(GET _orc_rt_candidates 0 ORC_RT_PATH)
+        endif()
       endif()
     endif()
   endif()
 endif()
 
 if(NOT ORC_RT_PATH)
-  message(FATAL_ERROR "Could not find liborc_rt. "
+  message(WARNING "Could not find liborc_rt. "
+    "ORC runtime features will be disabled. "
     "Ensure clang runtime libraries are installed (e.g. libclang-rt-dev).")
 endif()
 
-message(STATUS "Found liborc_rt: ${ORC_RT_PATH}")
-# Copy into build dir for editable installs (where _lib_dir resolves to CMAKE_BINARY_DIR)
-file(COPY "${ORC_RT_PATH}" DESTINATION "${CMAKE_BINARY_DIR}")
-install(FILES "${ORC_RT_PATH}" DESTINATION lib)
+if(ORC_RT_PATH)
+  message(STATUS "Found liborc_rt: ${ORC_RT_PATH}")
+  # Copy into build dir for editable installs (where _lib_dir resolves to CMAKE_BINARY_DIR)
+  file(COPY "${ORC_RT_PATH}" DESTINATION "${CMAKE_BINARY_DIR}")
+  install(FILES "${ORC_RT_PATH}" DESTINATION lib)
+endif()
 
 # Installation rules
 install(
   TARGETS tvm_ffi_orcjit
   LIBRARY DESTINATION lib
   ARCHIVE DESTINATION lib
-  RUNTIME DESTINATION bin
+  RUNTIME DESTINATION lib
 )

@@ -35,6 +35,7 @@ jobs:
           - {os: ubuntu-latest, arch: x86_64, build: "cp312-manylinux_x86_64"}
           - {os: ubuntu-24.04-arm, arch: aarch64, build: "cp312-manylinux_aarch64"}
           - {os: macos-14, arch: arm64, build: "cp312-macosx_arm64"}
+          - {os: windows-latest, arch: AMD64, build: "cp312-win_amd64"}
 
     steps:
       - uses: actions/checkout@v5
@@ -53,6 +54,7 @@ jobs:
           CIBW_BUILD: ${{ matrix.build }}
           CIBW_ARCHS_LINUX: ${{ matrix.arch }}
           CIBW_ARCHS_MACOS: ${{ matrix.arch }}
+          CIBW_ARCHS_WINDOWS: ${{ matrix.arch }}
           CIBW_BUILD_VERBOSITY: 1
           CMAKE_BUILD_PARALLEL_LEVEL: ${{ steps.env_vars.outputs.cpu_count }}
           CIBW_BEFORE_ALL_LINUX: bash {project}/addons/tvm-ffi-orcjit/tools/install_llvm.sh
@@ -60,8 +62,10 @@ jobs:
             sudo mkdir -p /opt/llvm &&
             sudo chown -R $(whoami) /opt/llvm &&
             bash {project}/addons/tvm-ffi-orcjit/tools/install_llvm.sh
+          CIBW_BEFORE_ALL_WINDOWS: >-
+            powershell -ExecutionPolicy Bypass -File {project}\addons\tvm-ffi-orcjit\tools\install_llvm.ps1
           CIBW_TEST_REQUIRES: pytest
-          CIBW_BEFORE_TEST: >-
+          CIBW_BEFORE_TEST_LINUX: >-
             pip install apache-tvm-ffi &&
             (cd {project}/addons/tvm-ffi-orcjit/tests &&
             cmake -B build -DCMAKE_CXX_COMPILER=/opt/llvm/bin/clang++ -DPython_EXECUTABLE=$(which python) &&
@@ -70,10 +74,32 @@ jobs:
             (cd {project}/addons/tvm-ffi-orcjit/examples/quick-start &&
             cmake -B build -DCMAKE_CXX_COMPILER=/opt/llvm/bin/clang++ -DPython_EXECUTABLE=$(which python) &&
             cmake --build build)
+          CIBW_BEFORE_TEST_MACOS: >-
+            pip install apache-tvm-ffi &&
+            (cd {project}/addons/tvm-ffi-orcjit/tests &&
+            cmake -B build -DCMAKE_CXX_COMPILER=/opt/llvm/bin/clang++ -DPython_EXECUTABLE=$(which python) &&
+            cmake --build build &&
+            cmake --install build) &&
+            (cd {project}/addons/tvm-ffi-orcjit/examples/quick-start &&
+            cmake -B build -DCMAKE_CXX_COMPILER=/opt/llvm/bin/clang++ -DPython_EXECUTABLE=$(which python) &&
+            cmake --build build)
+          CIBW_BEFORE_TEST_WINDOWS: >-
+            pip install apache-tvm-ffi &&
+            cd /d {project}\addons\tvm-ffi-orcjit\tests &&
+            cmake -B build -DCMAKE_CXX_COMPILER=C:\opt\llvm\bin\clang++.exe -DPython_EXECUTABLE=%PYTHON% &&
+            cmake --build build &&
+            cmake --install build &&
+            cd /d {project}\addons\tvm-ffi-orcjit\examples\quick-start &&
+            cmake -B build -DCMAKE_CXX_COMPILER=C:\opt\llvm\bin\clang++.exe -DPython_EXECUTABLE=%PYTHON% &&
+            cmake --build build
           CIBW_TEST_COMMAND: >-
             pytest {project}/addons/tvm-ffi-orcjit/tests -v &&
             (cd {project}/addons/tvm-ffi-orcjit/examples/quick-start &&
             python run.py)
+          CIBW_TEST_COMMAND_WINDOWS: >-
+            pytest {project}\addons\tvm-ffi-orcjit\tests -v &&
+            cd /d {project}\addons\tvm-ffi-orcjit\examples\quick-start &&
+            python run.py
 
       - uses: actions/upload-artifact@v4
         with:

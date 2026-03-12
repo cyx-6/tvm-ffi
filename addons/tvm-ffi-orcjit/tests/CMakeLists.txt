@@ -43,7 +43,10 @@ find_package(tvm_ffi CONFIG REQUIRED)
 # Create object library for test functions
 add_library(test_funcs_obj OBJECT sources/test_funcs.cc)
 target_link_libraries(test_funcs_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs_obj PRIVATE -fPIC -O2)
+target_compile_options(test_funcs_obj PRIVATE
+  $<$<CXX_COMPILER_ID:MSVC>:/O2>
+  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fPIC -O2>
+)
 install(
   FILES $<TARGET_OBJECTS:test_funcs_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
@@ -53,7 +56,10 @@ install(
 # Create object library for second set of test functions
 add_library(test_funcs2_obj OBJECT sources/test_funcs2.cc)
 target_link_libraries(test_funcs2_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs2_obj PRIVATE -fPIC -O2)
+target_compile_options(test_funcs2_obj PRIVATE
+  $<$<CXX_COMPILER_ID:MSVC>:/O2>
+  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fPIC -O2>
+)
 install(
   FILES $<TARGET_OBJECTS:test_funcs2_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
@@ -63,7 +69,10 @@ install(
 # Create object library for conflicting test functions
 add_library(test_funcs_conflict_obj OBJECT sources/test_funcs_conflict.cc)
 target_link_libraries(test_funcs_conflict_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs_conflict_obj PRIVATE -fPIC -O2)
+target_compile_options(test_funcs_conflict_obj PRIVATE
+  $<$<CXX_COMPILER_ID:MSVC>:/O2>
+  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fPIC -O2>
+)
 install(
   FILES $<TARGET_OBJECTS:test_funcs_conflict_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
@@ -73,7 +82,10 @@ install(
 # Create object library for constructor/destructor test functions
 add_library(test_ctor_dtor_obj OBJECT sources/test_ctor_dtor.cc)
 target_link_libraries(test_ctor_dtor_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_ctor_dtor_obj PRIVATE -fPIC -O2)
+target_compile_options(test_ctor_dtor_obj PRIVATE
+  $<$<CXX_COMPILER_ID:MSVC>:/O2>
+  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fPIC -O2>
+)
 install(
   FILES $<TARGET_OBJECTS:test_ctor_dtor_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
@@ -87,7 +99,10 @@ if (CUDAToolkit_FOUND)
   message(STATUS "CUDA found: ${CUDAToolkit_VERSION}")
   add_library(test_funcs_cuda_obj OBJECT sources/test_funcs_cuda.cu)
   target_link_libraries(test_funcs_cuda_obj PRIVATE tvm_ffi::header)
-  target_compile_options(test_funcs_cuda_obj PRIVATE -fPIC -O2)
+  target_compile_options(test_funcs_cuda_obj PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/O2>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fPIC -O2>
+  )
   install(
     FILES $<TARGET_OBJECTS:test_funcs_cuda_obj>
     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}

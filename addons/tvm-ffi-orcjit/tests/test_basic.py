@@ -317,6 +317,25 @@ def test_ctor_dtor() -> None:
         # ELF-only sections absent
         assert "<ctors>" not in log
         assert "<dtors>" not in log
+    elif sys.platform == "win32":
+        # COFF: constructors via .CRT$XC*, destructors via atexit/.CRT$XT*
+        # (drained by COFFPlatform deinitialize). Same native platform pattern
+        # as macOS: constructor ordering, destructor LIFO via atexit.
+        # No .ctors/.dtors sections on COFF.
+        main_idx = log.index("<main>")
+        pre = log[:main_idx]
+        post = log[main_idx:]
+        # constructors before main: priority 101 < 102 < 103 < default
+        assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
+        assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
+        assert pre.index("<init_array.103>") < pre.index("<init_array>")
+        # destructors after main: atexit LIFO order (reverse of registration)
+        assert post.index("<fini_array>") < post.index("<fini_array.103>")
+        assert post.index("<fini_array.103>") < post.index("<fini_array.102>")
+        assert post.index("<fini_array.102>") < post.index("<fini_array.101>")
+        # ELF-only sections absent
+        assert "<ctors>" not in log
+        assert "<dtors>" not in log
 
 
 if __name__ == "__main__":

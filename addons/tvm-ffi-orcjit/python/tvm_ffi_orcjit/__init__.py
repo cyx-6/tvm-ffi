@@ -31,25 +31,27 @@ Example:
 """
 
 import ctypes
+import os
 import platform
+import sys
 from pathlib import Path
 
 from tvm_ffi import load_module
 
-# Determine the library extension based on platform
-if platform.system() == "Darwin":
-    _LIB_EXT = "dylib"
-elif platform.system() == "Windows":
-    _LIB_EXT = "dll"
+# Determine the library name based on platform
+if platform.system() == "Windows":
+    _LIB_NAME = "tvm_ffi_orcjit.dll"
+elif platform.system() == "Darwin":
+    _LIB_NAME = "libtvm_ffi_orcjit.dylib"
 else:
-    _LIB_EXT = "so"
+    _LIB_NAME = "libtvm_ffi_orcjit.so"
 
 # Load the orcjit extension library
 # - lib/: normal install (wheel)
 # - ../../build/: editable install (cmake build output relative to python/tvm_ffi_orcjit/)
 _LIB_PATH = [
-    Path(__file__).parent / "lib" / f"libtvm_ffi_orcjit.{_LIB_EXT}",
-    Path(__file__).parent.parent.parent / "build" / f"libtvm_ffi_orcjit.{_LIB_EXT}",
+    Path(__file__).parent / "lib" / _LIB_NAME,
+    Path(__file__).parent.parent.parent / "build" / _LIB_NAME,
 ]
 _lib_dir = None
 for path in _LIB_PATH:
@@ -58,7 +60,7 @@ for path in _LIB_PATH:
         _lib_dir = path.parent
 if _lib_dir is None:
     raise RuntimeError(
-        f"Could not find libtvm_ffi_orcjit.{_LIB_EXT}. "
+        f"Could not find {_LIB_NAME}. "
         f"Searched in {_LIB_PATH} and site-packages. "
         f"Please ensure the package is installed correctly."
     )
@@ -66,8 +68,11 @@ if _lib_dir is None:
 # Explicitly initialize the library to register functions
 # This is needed because static initializers may not run when loaded via dlopen
 try:
+    # The dll search path need to be added explicitly in windows
+    if sys.platform.startswith("win32"):
+        os.add_dll_directory(str(_lib_dir))
     # Load the library with ctypes and call the initialization function
-    c_lib = ctypes.CDLL(str(_lib_dir / f"libtvm_ffi_orcjit.{_LIB_EXT}"), mode=ctypes.RTLD_GLOBAL)
+    c_lib = ctypes.CDLL(str(_lib_dir / _LIB_NAME), mode=ctypes.RTLD_GLOBAL)
     init_func = c_lib.TVMFFIOrcJITInitialize
     init_func.restype = None
     init_func()
