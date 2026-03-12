@@ -10,6 +10,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Append CMAKE_PREFIX_PATH from environment (scikit-build-core may override
+# the cache entry, so we re-add it here to ensure LLVM can be found).
+if(DEFINED ENV{CMAKE_PREFIX_PATH})
+  list(APPEND CMAKE_PREFIX_PATH "$ENV{CMAKE_PREFIX_PATH}")
+endif()
+
 # Find dependencies
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
