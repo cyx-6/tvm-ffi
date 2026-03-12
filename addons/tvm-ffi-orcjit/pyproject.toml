@@ -83,4 +83,4 @@ environment = { LLVM_VERSION = "22.1.0", CMAKE_PREFIX_PATH = "/opt/llvm", LLVM_C
 repair-wheel-command = "delocate-wheel --ignore-missing-dependencies --exclude libtvm_ffi.dylib -w {dest_dir} -v {wheel}"
 
 [tool.cibuildwheel.windows]
-environment = { LLVM_VERSION = "22.1.0", CMAKE_PREFIX_PATH = 'C:\opt\llvm\Library;C:\opt\llvm', LLVM_CONFIG_PATH = 'C:\opt\llvm\Library\bin\llvm-config.exe', CLANG_PATH = 'C:\opt\llvm\Library\bin\clang.exe' }
+environment = { LLVM_VERSION = "22.1.0", CMAKE_PREFIX_PATH = "C:/opt/llvm/Library;C:/opt/llvm", LLVM_CONFIG_PATH = "C:/opt/llvm/Library/bin/llvm-config.exe", CLANG_PATH = "C:/opt/llvm/Library/bin/clang.exe" }
