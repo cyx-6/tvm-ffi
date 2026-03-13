@@ -233,7 +233,7 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
     // macOS/Windows: ExecutorNativePlatform (MachOPlatform/COFFPlatform) requires
     // JITLink's ObjectLinkingLayer, not the default RTDyldObjectLinkingLayer.
     builder.setObjectLinkingLayerCreator(
-        [](llvm::orc::ExecutionSession& ES, const llvm::Triple&)
+        [](llvm::orc::ExecutionSession& ES)
             -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
           return std::make_unique<llvm::orc::ObjectLinkingLayer>(ES);
         });
