@@ -26,6 +26,7 @@
 
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
+#include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/Shared/ExecutorAddress.h>
 #include <llvm/ExecutionEngine/Orc/Shared/ExecutorSymbolDef.h>
 #include <llvm/Support/Error.h>
@@ -226,10 +227,19 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
 ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_path)
     : jit_(nullptr) {
   if (!orc_rt_path.empty()) {
-    jit_ = std::move(call_llvm(llvm::orc::LLJITBuilder()
-                                   .setPlatformSetUp(llvm::orc::ExecutorNativePlatform(orc_rt_path))
-                                   .create(),
-                               "Failed to create LLJIT with ORC runtime"));
+    auto builder = llvm::orc::LLJITBuilder();
+    builder.setPlatformSetUp(llvm::orc::ExecutorNativePlatform(orc_rt_path));
+#ifndef __linux__
+    // macOS/Windows: ExecutorNativePlatform (MachOPlatform/COFFPlatform) requires
+    // JITLink's ObjectLinkingLayer, not the default RTDyldObjectLinkingLayer.
+    builder.setObjectLinkingLayerCreator(
+        [](llvm::orc::ExecutionSession& ES, const llvm::Triple&)
+            -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
+          return std::make_unique<llvm::orc::ObjectLinkingLayer>(ES);
+        });
+#endif
+    jit_ = std::move(
+        call_llvm(builder.create(), "Failed to create LLJIT with ORC runtime"));
   } else {
     jit_ = std::move(call_llvm(llvm::orc::LLJITBuilder().create(), "Failed to create LLJIT"));
   }
