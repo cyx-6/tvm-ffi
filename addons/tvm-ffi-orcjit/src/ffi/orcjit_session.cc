@@ -257,15 +257,28 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
   std::vector<std::unique_ptr<uint64_t>> imp_stubs_;
 
   static void* FindInProcessModules(const std::string& Name) {
-    HMODULE hMods[512];
+    // First: check specific MSVC runtime DLLs by name. This is more reliable
+    // than EnumProcessModules when the process has many loaded modules.
+    static const char* kRuntimeDLLs[] = {
+        "vcruntime140.dll", "vcruntime140_1.dll", "ucrtbase.dll", "msvcp140.dll",
+    };
+    for (const char* dll : kRuntimeDLLs) {
+      if (HMODULE hMod = GetModuleHandleA(dll)) {
+        if (auto addr = GetProcAddress(hMod, Name.c_str()))
+          return reinterpret_cast<void*>(addr);
+      }
+    }
+    // Then: enumerate all loaded modules to find symbols in other DLLs
+    // (e.g., tvm_ffi Python extension, kernel32.dll, etc.)
+    HMODULE hMods[1024];
     DWORD cbNeeded;
-    if (!EnumProcessModules(GetCurrentProcess(), hMods, sizeof(hMods), &cbNeeded))
-      return nullptr;
-    DWORD count = cbNeeded / sizeof(HMODULE);
-    if (count > 512) count = 512;
-    for (DWORD i = 0; i < count; ++i) {
-      if (auto addr = GetProcAddress(hMods[i], Name.c_str()))
-        return reinterpret_cast<void*>(addr);
+    if (EnumProcessModules(GetCurrentProcess(), hMods, sizeof(hMods), &cbNeeded)) {
+      DWORD count = cbNeeded / sizeof(HMODULE);
+      if (count > 1024) count = 1024;
+      for (DWORD i = 0; i < count; ++i) {
+        if (auto addr = GetProcAddress(hMods[i], Name.c_str()))
+          return reinterpret_cast<void*>(addr);
+      }
     }
     return nullptr;
   }
