@@ -21,6 +21,7 @@ project(tvm_ffi_orcjit_example)
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Run `python -m tvm_ffi.config --cmakedir` to find tvm-ffi package
 find_package(
@@ -40,10 +41,7 @@ add_library(add_obj OBJECT add.cc)
 target_link_libraries(add_obj PRIVATE tvm_ffi::header)
 
 # Set compiler flags
-target_compile_options(add_obj PRIVATE
-  -O2
-  $<$<NOT:$<BOOL:${WIN32}>>:-fPIC>
-)
+target_compile_options(add_obj PRIVATE -O2)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
   target_compile_options(add_obj PRIVATE -mno-outline-atomics)
 endif()

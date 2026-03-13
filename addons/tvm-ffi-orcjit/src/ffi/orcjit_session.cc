@@ -226,22 +226,43 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
 
 ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_path)
     : jit_(nullptr) {
-  if (!orc_rt_path.empty()) {
-    auto builder = llvm::orc::LLJITBuilder();
-    builder.setPlatformSetUp(llvm::orc::ExecutorNativePlatform(orc_rt_path));
-#ifdef __APPLE__
-    // macOS: MachOPlatform requires JITLink's ObjectLinkingLayer,
-    // not the default RTDyldObjectLinkingLayer.
+  // Helper: force JITLink's ObjectLinkingLayer on platforms where
+  // the default RTDyldObjectLinkingLayer won't work.
+  //
+  // macOS: MachOPlatform (via ExecutorNativePlatform) requires ObjectLinkingLayer.
+  //
+  // Windows: LLJIT defaults to RTDyldObjectLinkingLayer for COFF x86_64
+  // (see LLJIT.cpp, LLJITBuilderState::prepareForConstruction). We need
+  // ObjectLinkingLayer because:
+  //   1. Our InitFiniPlugin inherits ObjectLinkingLayer::Plugin — RTDyld has
+  //      no plugin API, so the static_cast<ObjectLinkingLayer&> would crash.
+  //   2. We skip the ORC runtime on Windows (COFFPlatform requires MSVC CRT
+  //      symbols like _CxxThrowException, RTTI vtables, iostream objects that
+  //      are not resolvable in the JIT), so we handle .CRT$XC*/.CRT$XT*
+  //      init/fini sections ourselves via the plugin.
+  //
+  // Linux: LLJIT already defaults to ObjectLinkingLayer for ELF, no override needed.
+  auto set_jitlink_layer = [](llvm::orc::LLJITBuilder& builder) {
+#if defined(__APPLE__) || defined(_WIN32)
     builder.setObjectLinkingLayerCreator(
         [](llvm::orc::ExecutionSession& ES)
             -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
           return std::make_unique<llvm::orc::ObjectLinkingLayer>(ES);
         });
 #endif
+    (void)builder;
+  };
+
+  if (!orc_rt_path.empty()) {
+    auto builder = llvm::orc::LLJITBuilder();
+    builder.setPlatformSetUp(llvm::orc::ExecutorNativePlatform(orc_rt_path));
+    set_jitlink_layer(builder);
     jit_ = std::move(
         call_llvm(builder.create(), "Failed to create LLJIT with ORC runtime"));
   } else {
-    jit_ = std::move(call_llvm(llvm::orc::LLJITBuilder().create(), "Failed to create LLJIT"));
+    auto builder = llvm::orc::LLJITBuilder();
+    set_jitlink_layer(builder);
+    jit_ = std::move(call_llvm(builder.create(), "Failed to create LLJIT"));
   }
 #if defined(__linux__) || defined(_WIN32)
   // Linux/Windows: use our custom InitFiniPlugin for init/fini section collection

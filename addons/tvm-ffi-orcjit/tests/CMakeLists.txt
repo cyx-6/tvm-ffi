@@ -21,6 +21,7 @@ project(tvm_ffi_orcjit_tests)
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # On ARM64, disable outline atomics to avoid needing compiler-rt symbols at JIT time
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
@@ -43,10 +44,7 @@ find_package(tvm_ffi CONFIG REQUIRED)
 # Create object library for test functions
 add_library(test_funcs_obj OBJECT sources/test_funcs.cc)
 target_link_libraries(test_funcs_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs_obj PRIVATE
-  -O2
-  $<$<NOT:$<BOOL:${WIN32}>>:-fPIC>
-)
+target_compile_options(test_funcs_obj PRIVATE -O2)
 install(
   FILES $<TARGET_OBJECTS:test_funcs_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
@@ -56,10 +54,7 @@ install(
 # Create object library for second set of test functions
 add_library(test_funcs2_obj OBJECT sources/test_funcs2.cc)
 target_link_libraries(test_funcs2_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs2_obj PRIVATE
-  -O2
-  $<$<NOT:$<BOOL:${WIN32}>>:-fPIC>
-)
+target_compile_options(test_funcs2_obj PRIVATE -O2)
 install(
   FILES $<TARGET_OBJECTS:test_funcs2_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
@@ -69,10 +64,7 @@ install(
 # Create object library for conflicting test functions
 add_library(test_funcs_conflict_obj OBJECT sources/test_funcs_conflict.cc)
 target_link_libraries(test_funcs_conflict_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs_conflict_obj PRIVATE
-  -O2
-  $<$<NOT:$<BOOL:${WIN32}>>:-fPIC>
-)
+target_compile_options(test_funcs_conflict_obj PRIVATE -O2)
 install(
   FILES $<TARGET_OBJECTS:test_funcs_conflict_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
@@ -82,10 +74,7 @@ install(
 # Create object library for constructor/destructor test functions
 add_library(test_ctor_dtor_obj OBJECT sources/test_ctor_dtor.cc)
 target_link_libraries(test_ctor_dtor_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_ctor_dtor_obj PRIVATE
-  -O2
-  $<$<NOT:$<BOOL:${WIN32}>>:-fPIC>
-)
+target_compile_options(test_ctor_dtor_obj PRIVATE -O2)
 install(
   FILES $<TARGET_OBJECTS:test_ctor_dtor_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
@@ -100,8 +89,7 @@ if (CUDAToolkit_FOUND)
   add_library(test_funcs_cuda_obj OBJECT sources/test_funcs_cuda.cu)
   target_link_libraries(test_funcs_cuda_obj PRIVATE tvm_ffi::header)
   target_compile_options(test_funcs_cuda_obj PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/O2>
-    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fPIC -O2>
+    -O2
   )
   install(
     FILES $<TARGET_OBJECTS:test_funcs_cuda_obj>

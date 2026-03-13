@@ -10,8 +10,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Append CMAKE_PREFIX_PATH from environment (scikit-build-core may override
-# the cache entry, so we re-add it here to ensure LLVM can be found).
+# Append CMAKE_PREFIX_PATH from environment. scikit-build-core overrides
+# CMAKE_PREFIX_PATH via its CMake init cache, so any value from the user's
+# environment would be lost. Re-appending ensures find_package(LLVM) works
+# regardless of where LLVM is installed.
 if(DEFINED ENV{CMAKE_PREFIX_PATH})
   list(APPEND CMAKE_PREFIX_PATH "$ENV{CMAKE_PREFIX_PATH}")
 endif()
@@ -104,13 +106,19 @@ target_link_libraries(
   PRIVATE tvm_ffi::header tvm_ffi::shared ${_llvm_static_ldflags_list}
           ${_llvm_static_libs_list} ${ZLIB_STATIC} ${ZSTD_STATIC}
 )
-if(WIN32)
-  # LLVM on Windows needs these system libraries.
-  # We link them explicitly rather than using llvm-config --system-libs
-  # because that also includes -lzstd/-lz which conflict with our static libs.
-  target_link_libraries(tvm_ffi_orcjit PRIVATE
-    ntdll psapi shell32 ole32 uuid advapi32 version
-  )
+# Link LLVM system library dependencies (e.g. ntdll, psapi on Windows; rt, dl on Linux).
+# We use llvm-config --system-libs but filter out zlib/zstd since we link our own static copies.
+execute_process(
+  COMMAND ${LLVM_CONFIG_EXE} --system-libs
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  OUTPUT_VARIABLE _llvm_system_libs
+  RESULT_VARIABLE _llvm_system_libs_rc
+)
+if(_llvm_system_libs_rc EQUAL 0 AND _llvm_system_libs)
+  separate_arguments(_llvm_system_libs_list NATIVE_COMMAND "${_llvm_system_libs}")
+  list(FILTER _llvm_system_libs_list EXCLUDE REGEX "z(std)?$")
+  message(STATUS "LLVM system libs: ${_llvm_system_libs_list}")
+  target_link_libraries(tvm_ffi_orcjit PRIVATE ${_llvm_system_libs_list})
 endif()
 
 if(APPLE)
