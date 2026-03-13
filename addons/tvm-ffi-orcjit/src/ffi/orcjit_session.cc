@@ -38,6 +38,17 @@
 
 #include <cstddef>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <psapi.h>
+#endif
+
 #include "orcjit_dylib.h"
 #include "orcjit_utils.h"
 
@@ -224,6 +235,79 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
                                    llvm::orc::ResourceKey SrcKey) override {}
 };
 
+#ifdef _WIN32
+/*!
+ * \brief Custom definition generator for Windows DLL import symbols.
+ *
+ * On Windows with the MSVC ABI, COFF objects reference DLL-imported symbols
+ * via __imp_XXX pointer stubs. Without COFFPlatform (which we skip due to
+ * MSVC CRT dependency issues), JITLink cannot resolve these. This generator:
+ *
+ * 1. For __imp_XXX: strips the prefix, finds XXX in all loaded process
+ *    modules via EnumProcessModules + GetProcAddress, allocates a pointer
+ *    stub, and defines __imp_XXX pointing to it.
+ * 2. For _tls_index: provides a real TLS slot allocated via TlsAlloc().
+ * 3. For other symbols: searches all loaded process modules directly.
+ *
+ * This covers MSVC C++ runtime symbols (vcruntime140.dll, msvcp140.dll,
+ * ucrtbase.dll) and TVM-FFI exports that the default process-symbol
+ * generator misses (it only searches the main exe module on Windows).
+ */
+class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
+  std::vector<std::unique_ptr<uint64_t>> imp_stubs_;
+
+  static void* FindInProcessModules(const std::string& Name) {
+    HMODULE hMods[512];
+    DWORD cbNeeded;
+    if (!EnumProcessModules(GetCurrentProcess(), hMods, sizeof(hMods), &cbNeeded))
+      return nullptr;
+    DWORD count = cbNeeded / sizeof(HMODULE);
+    if (count > 512) count = 512;
+    for (DWORD i = 0; i < count; ++i) {
+      if (auto addr = GetProcAddress(hMods[i], Name.c_str()))
+        return reinterpret_cast<void*>(addr);
+    }
+    return nullptr;
+  }
+
+ public:
+  llvm::Error tryToGenerate(llvm::orc::LookupState& LS, llvm::orc::LookupKind K,
+                            llvm::orc::JITDylib& JD,
+                            llvm::orc::JITDylibLookupFlags JDLookupFlags,
+                            const llvm::orc::SymbolLookupSet& LookupSet) override {
+    llvm::orc::SymbolMap NewSymbols;
+    for (auto& [Name, Flags] : LookupSet) {
+      llvm::StringRef NameStr = *Name;
+      if (NameStr.starts_with("__imp_")) {
+        // DLL import stub: resolve the underlying symbol, create a pointer indirection
+        std::string RealName = NameStr.drop_front(6).str();
+        if (void* Addr = FindInProcessModules(RealName)) {
+          auto stub = std::make_unique<uint64_t>(reinterpret_cast<uint64_t>(Addr));
+          NewSymbols[Name] = {llvm::orc::ExecutorAddr::fromPtr(stub.get()),
+                              llvm::JITSymbolFlags::Exported};
+          imp_stubs_.push_back(std::move(stub));
+        }
+      } else if (NameStr == "_tls_index") {
+        // _tls_index is a per-module variable set by the PE loader during DLL
+        // loading. JIT code has no PE loader, so we allocate a real TLS slot.
+        static DWORD jit_tls_index = TlsAlloc();
+        NewSymbols[Name] = {llvm::orc::ExecutorAddr::fromPtr(&jit_tls_index),
+                            llvm::JITSymbolFlags::Exported};
+      } else {
+        // Try to find the symbol in any loaded process module
+        if (void* Addr = FindInProcessModules(NameStr.str())) {
+          NewSymbols[Name] = {llvm::orc::ExecutorAddr::fromPtr(Addr),
+                              llvm::JITSymbolFlags::Exported};
+        }
+      }
+    }
+    if (!NewSymbols.empty())
+      return JD.define(llvm::orc::absoluteSymbols(std::move(NewSymbols)));
+    return llvm::Error::success();
+  }
+};
+#endif  // _WIN32
+
 ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_path)
     : jit_(nullptr) {
   // Helper: force JITLink's ObjectLinkingLayer on platforms where
@@ -271,6 +355,15 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
   auto& objlayer = jit_->getObjLinkingLayer();
   static_cast<llvm::orc::ObjectLinkingLayer&>(objlayer).addPlugin(
       std::make_unique<InitFiniPlugin>(GetRef<ORCJITExecutionSession>(this)));
+#endif
+#ifdef _WIN32
+  // On Windows, the default process-symbol generator only searches the main
+  // exe module via GetProcAddress(GetModuleHandle(NULL), ...). Add a
+  // comprehensive generator that searches all loaded DLLs (vcruntime140,
+  // msvcp140, ucrtbase, tvm_ffi, etc.) and creates __imp_* pointer stubs.
+  if (auto* PSG = jit_->getProcessSymbolsJITDylib()) {
+    PSG->addGenerator(std::make_unique<DLLImportDefinitionGenerator>());
+  }
 #endif
 }
 
