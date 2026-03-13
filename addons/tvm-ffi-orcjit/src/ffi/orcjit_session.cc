@@ -361,7 +361,7 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
   // exe module via GetProcAddress(GetModuleHandle(NULL), ...). Add a
   // comprehensive generator that searches all loaded DLLs (vcruntime140,
   // msvcp140, ucrtbase, tvm_ffi, etc.) and creates __imp_* pointer stubs.
-  if (auto* PSG = jit_->getProcessSymbolsJITDylib()) {
+  if (auto PSG = jit_->getProcessSymbolsJITDylib()) {
     PSG->addGenerator(std::make_unique<DLLImportDefinitionGenerator>());
   }
 #endif
