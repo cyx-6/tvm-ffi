@@ -229,9 +229,9 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
   if (!orc_rt_path.empty()) {
     auto builder = llvm::orc::LLJITBuilder();
     builder.setPlatformSetUp(llvm::orc::ExecutorNativePlatform(orc_rt_path));
-#ifndef __linux__
-    // macOS/Windows: ExecutorNativePlatform (MachOPlatform/COFFPlatform) requires
-    // JITLink's ObjectLinkingLayer, not the default RTDyldObjectLinkingLayer.
+#ifdef __APPLE__
+    // macOS: MachOPlatform requires JITLink's ObjectLinkingLayer,
+    // not the default RTDyldObjectLinkingLayer.
     builder.setObjectLinkingLayerCreator(
         [](llvm::orc::ExecutionSession& ES)
             -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
@@ -243,11 +243,10 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
   } else {
     jit_ = std::move(call_llvm(llvm::orc::LLJITBuilder().create(), "Failed to create LLJIT"));
   }
-#ifdef __linux__
-  // Linux: use our custom InitFiniPlugin for .ctors/.dtors/.init_array/.fini_array
-  // priority handling and explicit section collection.
-  // macOS/Windows: native LLVM platforms (MachOPlatform/COFFPlatform) handle
-  // init/fini natively; we use jit_->initialize()/deinitialize() instead.
+#if defined(__linux__) || defined(_WIN32)
+  // Linux/Windows: use our custom InitFiniPlugin for init/fini section collection
+  // and priority-ordered execution.
+  // macOS: MachOPlatform handles init/fini natively via jit_->initialize()/deinitialize().
   auto& objlayer = jit_->getObjLinkingLayer();
   static_cast<llvm::orc::ObjectLinkingLayer&>(objlayer).addPlugin(
       std::make_unique<InitFiniPlugin>(GetRef<ORCJITExecutionSession>(this)));

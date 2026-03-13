@@ -28,10 +28,11 @@ def _find_orc_rt_library() -> str | None:
     """Find the bundled liborc_rt library in the same directory as the .so/.dll."""
     import sys
 
+    # Windows: skip ORC runtime (COFFPlatform has unresolved MSVC CRT dependencies).
+    # We use our custom InitFiniPlugin for init/fini handling on Windows instead.
     if sys.platform == "win32":
-        patterns = ["orc_rt*.lib", "liborc_rt*.a"]
-    else:
-        patterns = ["liborc_rt*.a"]
+        return None
+    patterns = ["liborc_rt*.a"]
     for pattern in patterns:
         for lib_path in _lib_dir.glob(pattern):
             return str(lib_path)

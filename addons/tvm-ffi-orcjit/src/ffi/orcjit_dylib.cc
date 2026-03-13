@@ -62,13 +62,13 @@ ORCJITDynamicLibraryObj::ORCJITDynamicLibraryObj(ORCJITExecutionSession session,
 }
 
 ORCJITDynamicLibraryObj::~ORCJITDynamicLibraryObj() {
-#ifdef __linux__
-  // Linux: run section-based deinitializers (.fini_array, .dtors)
+#if defined(__linux__) || defined(_WIN32)
+  // Linux/Windows: run section-based deinitializers (.fini_array, .dtors, .CRT$XT*)
   // collected by our custom InitFiniPlugin.
   session_->RunPendingDeinitializers(GetJITDylib());
 #else
-  // macOS/Windows: native platform's deinitialize drains __cxa_atexit/atexit
-  // handlers (registered during initialization) via the ORC runtime.
+  // macOS: native platform's deinitialize drains __cxa_atexit handlers
+  // (registered during initialization) via the ORC runtime.
   if (auto err = jit_->deinitialize(*dylib_)) {
     llvm::consumeError(std::move(err));
   }
@@ -109,12 +109,12 @@ void* ORCJITDynamicLibraryObj::GetSymbol(const String& name) {
   auto symbol_or_err =
       jit_->getExecutionSession().lookup(search_order, jit_->mangleAndIntern(name.c_str()));
 
-#ifdef __linux__
-  // Linux: run initializers collected by our custom InitFiniPlugin.
+#if defined(__linux__) || defined(_WIN32)
+  // Linux/Windows: run initializers collected by our custom InitFiniPlugin.
   session_->RunPendingInitializers(GetJITDylib());
 #else
-  // macOS/Windows: use native platform's init mechanism (handles __mod_init_func/
-  // .CRT$XC* and __cxa_atexit/atexit registration).
+  // macOS: use native platform's init mechanism (handles __mod_init_func
+  // and __cxa_atexit registration).
   if (auto err = jit_->initialize(*dylib_)) {
     llvm::consumeError(std::move(err));
   }
