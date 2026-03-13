@@ -44,8 +44,8 @@ find_package(tvm_ffi CONFIG REQUIRED)
 add_library(test_funcs_obj OBJECT sources/test_funcs.cc)
 target_link_libraries(test_funcs_obj PRIVATE tvm_ffi::header)
 target_compile_options(test_funcs_obj PRIVATE
-  $<$<CXX_COMPILER_ID:MSVC>:/O2>
-  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fPIC -O2>
+  -O2
+  $<$<NOT:$<BOOL:${WIN32}>>:-fPIC>
 )
 install(
   FILES $<TARGET_OBJECTS:test_funcs_obj>
@@ -57,8 +57,8 @@ install(
 add_library(test_funcs2_obj OBJECT sources/test_funcs2.cc)
 target_link_libraries(test_funcs2_obj PRIVATE tvm_ffi::header)
 target_compile_options(test_funcs2_obj PRIVATE
-  $<$<CXX_COMPILER_ID:MSVC>:/O2>
-  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fPIC -O2>
+  -O2
+  $<$<NOT:$<BOOL:${WIN32}>>:-fPIC>
 )
 install(
   FILES $<TARGET_OBJECTS:test_funcs2_obj>
@@ -70,8 +70,8 @@ install(
 add_library(test_funcs_conflict_obj OBJECT sources/test_funcs_conflict.cc)
 target_link_libraries(test_funcs_conflict_obj PRIVATE tvm_ffi::header)
 target_compile_options(test_funcs_conflict_obj PRIVATE
-  $<$<CXX_COMPILER_ID:MSVC>:/O2>
-  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fPIC -O2>
+  -O2
+  $<$<NOT:$<BOOL:${WIN32}>>:-fPIC>
 )
 install(
   FILES $<TARGET_OBJECTS:test_funcs_conflict_obj>
@@ -83,8 +83,8 @@ install(
 add_library(test_ctor_dtor_obj OBJECT sources/test_ctor_dtor.cc)
 target_link_libraries(test_ctor_dtor_obj PRIVATE tvm_ffi::header)
 target_compile_options(test_ctor_dtor_obj PRIVATE
-  $<$<CXX_COMPILER_ID:MSVC>:/O2>
-  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fPIC -O2>
+  -O2
+  $<$<NOT:$<BOOL:${WIN32}>>:-fPIC>
 )
 install(
   FILES $<TARGET_OBJECTS:test_ctor_dtor_obj>

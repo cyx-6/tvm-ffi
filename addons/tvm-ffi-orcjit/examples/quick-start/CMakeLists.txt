@@ -41,8 +41,8 @@ target_link_libraries(add_obj PRIVATE tvm_ffi::header)
 
 # Set compiler flags
 target_compile_options(add_obj PRIVATE
-  $<$<CXX_COMPILER_ID:MSVC>:/O2>
-  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fPIC -O2>
+  -O2
+  $<$<NOT:$<BOOL:${WIN32}>>:-fPIC>
 )
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
   target_compile_options(add_obj PRIVATE -mno-outline-atomics)
