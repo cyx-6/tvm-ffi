@@ -29,6 +29,7 @@
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/Shared/ExecutorAddress.h>
 #include <llvm/ExecutionEngine/Orc/Shared/ExecutorSymbolDef.h>
+#include <llvm/Support/DynamicLibrary.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
 #include <tvm/ffi/cast.h>
@@ -257,13 +258,13 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
   std::vector<std::unique_ptr<uint64_t>> imp_stubs_;
 
   static void* FindInProcessModules(const std::string& Name) {
-    // First: check specific MSVC runtime DLLs by name. This is more reliable
-    // than EnumProcessModules when the process has many loaded modules.
+    // First: check specific MSVC runtime DLLs via LoadLibraryA (ensures the
+    // handle is valid even if the DLL was loaded under a different path).
     static const char* kRuntimeDLLs[] = {
         "vcruntime140.dll", "vcruntime140_1.dll", "ucrtbase.dll", "msvcp140.dll",
     };
     for (const char* dll : kRuntimeDLLs) {
-      if (HMODULE hMod = GetModuleHandleA(dll)) {
+      if (HMODULE hMod = LoadLibraryA(dll)) {
         if (auto addr = GetProcAddress(hMod, Name.c_str()))
           return reinterpret_cast<void*>(addr);
       }
@@ -280,7 +281,8 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
           return reinterpret_cast<void*>(addr);
       }
     }
-    return nullptr;
+    // Final fallback: LLVM's dynamic library search
+    return llvm::sys::DynamicLibrary::SearchForAddressOfSymbol(Name);
   }
 
  public:
@@ -370,6 +372,11 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
       std::make_unique<InitFiniPlugin>(GetRef<ORCJITExecutionSession>(this)));
 #endif
 #ifdef _WIN32
+  // Pre-load MSVC runtime DLLs into LLVM's permanent library set so
+  // SearchForAddressOfSymbol can find their exports.
+  for (const char* dll : {"vcruntime140.dll", "ucrtbase.dll", "msvcp140.dll"}) {
+    llvm::sys::DynamicLibrary::LoadLibraryPermanently(dll);
+  }
   // On Windows, the default process-symbol generator only searches the main
   // exe module via GetProcAddress(GetModuleHandle(NULL), ...). Add a
   // comprehensive generator that searches all loaded DLLs (vcruntime140,
