@@ -85,13 +85,15 @@ jobs:
             cmake --build build)
           CIBW_BEFORE_TEST_WINDOWS: >-
             pip install apache-tvm-ffi &&
-            cd /d {project}\addons\tvm-ffi-orcjit\tests &&
+            pushd {project}\addons\tvm-ffi-orcjit\tests &&
             cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=C:/opt/llvm/Library/bin/clang.exe -DCMAKE_CXX_COMPILER=C:/opt/llvm/Library/bin/clang++.exe -DPython_EXECUTABLE=%PYTHON% &&
             cmake --build build &&
             cmake --install build &&
-            cd /d {project}\addons\tvm-ffi-orcjit\examples\quick-start &&
+            popd &&
+            pushd {project}\addons\tvm-ffi-orcjit\examples\quick-start &&
             cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=C:/opt/llvm/Library/bin/clang.exe -DCMAKE_CXX_COMPILER=C:/opt/llvm/Library/bin/clang++.exe -DPython_EXECUTABLE=%PYTHON% &&
-            cmake --build build
+            cmake --build build &&
+            popd
           CIBW_TEST_COMMAND: >-
             pytest {project}/addons/tvm-ffi-orcjit/tests -v &&
             (cd {project}/addons/tvm-ffi-orcjit/examples/quick-start &&
