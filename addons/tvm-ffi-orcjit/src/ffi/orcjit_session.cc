@@ -452,12 +452,24 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
   //      init/fini sections ourselves via the plugin.
   //
   // Linux: LLJIT already defaults to ObjectLinkingLayer for ELF, no override needed.
-  auto set_jitlink_layer = [](llvm::orc::LLJITBuilder& builder) {
+  auto setup_builder = [](llvm::orc::LLJITBuilder& builder) {
 #if defined(__APPLE__) || defined(_WIN32)
     builder.setObjectLinkingLayerCreator(
         [](llvm::orc::ExecutionSession& ES)
             -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
           return std::make_unique<llvm::orc::ObjectLinkingLayer>(ES);
+        });
+#endif
+#ifdef _WIN32
+    // Override ProcessSymbols setup to NOT add the default
+    // EPCDynamicLibrarySearchGenerator. That generator resolves symbols to
+    // absolute host-process addresses, which causes PCRel32 overflow when
+    // JIT code calls into DLLs >2GB away. Our DLLImportDefinitionGenerator
+    // (added after construction) wraps every resolved address in a
+    // JIT-allocated PLT stub, keeping all fixups in range.
+    builder.setProcessSymbolsJITDylibSetup(
+        [](llvm::orc::LLJIT& J) -> llvm::Expected<llvm::orc::JITDylibSP> {
+          return &J.getExecutionSession().createBareJITDylib("<Process Symbols>");
         });
 #endif
     (void)builder;
@@ -466,12 +478,12 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
   if (!orc_rt_path.empty()) {
     auto builder = llvm::orc::LLJITBuilder();
     builder.setPlatformSetUp(llvm::orc::ExecutorNativePlatform(orc_rt_path));
-    set_jitlink_layer(builder);
+    setup_builder(builder);
     jit_ = std::move(
         call_llvm(builder.create(), "Failed to create LLJIT with ORC runtime"));
   } else {
     auto builder = llvm::orc::LLJITBuilder();
-    set_jitlink_layer(builder);
+    setup_builder(builder);
     jit_ = std::move(call_llvm(builder.create(), "Failed to create LLJIT"));
   }
 #if defined(__linux__) || defined(_WIN32)
