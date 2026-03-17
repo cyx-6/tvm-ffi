@@ -265,8 +265,11 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
     };
     for (const char* dll : kRuntimeDLLs) {
       if (HMODULE hMod = LoadLibraryA(dll)) {
-        if (auto addr = GetProcAddress(hMod, Name.c_str()))
+        if (auto addr = GetProcAddress(hMod, Name.c_str())) {
+          fprintf(stderr, "[DLLGen] Found '%s' in %s at %p\n", Name.c_str(), dll,
+                  reinterpret_cast<void*>(addr));
           return reinterpret_cast<void*>(addr);
+        }
       }
     }
     // Then: enumerate all loaded modules to find symbols in other DLLs
@@ -277,12 +280,23 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
       DWORD count = cbNeeded / sizeof(HMODULE);
       if (count > 1024) count = 1024;
       for (DWORD i = 0; i < count; ++i) {
-        if (auto addr = GetProcAddress(hMods[i], Name.c_str()))
+        if (auto addr = GetProcAddress(hMods[i], Name.c_str())) {
+          char modName[260];
+          GetModuleFileNameA(hMods[i], modName, sizeof(modName));
+          fprintf(stderr, "[DLLGen] Found '%s' in module '%s' at %p\n", Name.c_str(), modName,
+                  reinterpret_cast<void*>(addr));
           return reinterpret_cast<void*>(addr);
+        }
       }
     }
     // Final fallback: LLVM's dynamic library search
-    return llvm::sys::DynamicLibrary::SearchForAddressOfSymbol(Name);
+    if (void* addr = llvm::sys::DynamicLibrary::SearchForAddressOfSymbol(Name)) {
+      fprintf(stderr, "[DLLGen] Found '%s' via LLVM SearchForAddressOfSymbol at %p\n", Name.c_str(),
+              addr);
+      return addr;
+    }
+    fprintf(stderr, "[DLLGen] FAILED to find '%s' in any module\n", Name.c_str());
+    return nullptr;
   }
 
  public:
@@ -290,12 +304,16 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
                             llvm::orc::JITDylib& JD,
                             llvm::orc::JITDylibLookupFlags JDLookupFlags,
                             const llvm::orc::SymbolLookupSet& LookupSet) override {
+    fprintf(stderr, "[DLLGen] tryToGenerate called with %zu symbols on JD '%s'\n", LookupSet.size(),
+            JD.getName().c_str());
     llvm::orc::SymbolMap NewSymbols;
     for (auto& [Name, Flags] : LookupSet) {
       llvm::StringRef NameStr = *Name;
+      fprintf(stderr, "[DLLGen] Processing: '%s'\n", NameStr.str().c_str());
       if (NameStr.starts_with("__imp_")) {
         // DLL import stub: resolve the underlying symbol, create a pointer indirection
         std::string RealName = NameStr.drop_front(6).str();
+        fprintf(stderr, "[DLLGen]   __imp_ prefix -> looking up '%s'\n", RealName.c_str());
         if (void* Addr = FindInProcessModules(RealName)) {
           auto stub = std::make_unique<uint64_t>(reinterpret_cast<uint64_t>(Addr));
           NewSymbols[Name] = {llvm::orc::ExecutorAddr::fromPtr(stub.get()),
@@ -308,6 +326,7 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
         static DWORD jit_tls_index = TlsAlloc();
         NewSymbols[Name] = {llvm::orc::ExecutorAddr::fromPtr(&jit_tls_index),
                             llvm::JITSymbolFlags::Exported};
+        fprintf(stderr, "[DLLGen]   Provided _tls_index = %lu\n", jit_tls_index);
       } else {
         // Try to find the symbol in any loaded process module
         if (void* Addr = FindInProcessModules(NameStr.str())) {
@@ -316,6 +335,7 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
         }
       }
     }
+    fprintf(stderr, "[DLLGen] Resolved %zu of %zu symbols\n", NewSymbols.size(), LookupSet.size());
     if (!NewSymbols.empty())
       return JD.define(llvm::orc::absoluteSymbols(std::move(NewSymbols)));
     return llvm::Error::success();
@@ -374,15 +394,36 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
 #ifdef _WIN32
   // Pre-load MSVC runtime DLLs into LLVM's permanent library set so
   // SearchForAddressOfSymbol can find their exports.
+  fprintf(stderr, "[OrcJIT] Pre-loading runtime DLLs...\n");
   for (const char* dll : {"vcruntime140.dll", "ucrtbase.dll", "msvcp140.dll"}) {
-    llvm::sys::DynamicLibrary::LoadLibraryPermanently(dll);
+    std::string err;
+    bool failed = llvm::sys::DynamicLibrary::LoadLibraryPermanently(dll, &err);
+    fprintf(stderr, "[OrcJIT]   LoadLibraryPermanently(%s): %s\n", dll,
+            failed ? err.c_str() : "OK");
   }
   // On Windows, the default process-symbol generator only searches the main
   // exe module via GetProcAddress(GetModuleHandle(NULL), ...). Add a
   // comprehensive generator that searches all loaded DLLs (vcruntime140,
   // msvcp140, ucrtbase, tvm_ffi, etc.) and creates __imp_* pointer stubs.
   if (auto PSG = jit_->getProcessSymbolsJITDylib()) {
+    fprintf(stderr, "[OrcJIT] ProcessSymbols JITDylib found: '%s'\n", PSG->getName().c_str());
     PSG->addGenerator(std::make_unique<DLLImportDefinitionGenerator>());
+    fprintf(stderr, "[OrcJIT] Added DLLImportDefinitionGenerator\n");
+  } else {
+    fprintf(stderr, "[OrcJIT] WARNING: ProcessSymbols JITDylib is NULL!\n");
+  }
+
+  // Quick sanity check: can we find the target symbols right now?
+  fprintf(stderr, "[OrcJIT] Quick GetProcAddress sanity check:\n");
+  if (HMODULE hVcrt = LoadLibraryA("vcruntime140.dll")) {
+    const char* test_syms[] = {"_Init_thread_header", "??_7type_info@@6B@", "??3@YAXPEAX_K@Z"};
+    for (const char* sym : test_syms) {
+      auto addr = GetProcAddress(hVcrt, sym);
+      fprintf(stderr, "[OrcJIT]   GetProcAddress(vcrt, \"%s\") = %p\n", sym,
+              reinterpret_cast<void*>(addr));
+    }
+  } else {
+    fprintf(stderr, "[OrcJIT]   LoadLibraryA(vcruntime140.dll) FAILED!\n");
   }
 #endif
 }
