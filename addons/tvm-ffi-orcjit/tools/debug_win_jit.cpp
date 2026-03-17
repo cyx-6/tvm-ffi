@@ -24,7 +24,9 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
+#include <typeinfo>
 #include <vector>
 
 #ifdef _WIN32
@@ -40,6 +42,54 @@
 
 using namespace llvm;
 using namespace llvm::orc;
+
+#ifdef _WIN32
+// ---- Static CRT symbol stubs ----
+// These symbols are in vcruntime's static lib, not exported from DLLs.
+static SRWLOCK g_tss_lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE g_tss_cv = CONDITION_VARIABLE_INIT;
+
+static void stub_Init_thread_header(int *guard) {
+  AcquireSRWLockExclusive(&g_tss_lock);
+  if (*guard == 0) {
+    *guard = -1;
+  } else {
+    while (*guard == -1)
+      SleepConditionVariableSRW(&g_tss_cv, &g_tss_lock, INFINITE, 0);
+  }
+  ReleaseSRWLockExclusive(&g_tss_lock);
+}
+static void stub_Init_thread_footer(int *guard) {
+  AcquireSRWLockExclusive(&g_tss_lock);
+  *guard = 1;
+  ReleaseSRWLockExclusive(&g_tss_lock);
+  WakeAllConditionVariable(&g_tss_cv);
+}
+static void stub_Init_thread_abort(int *guard) {
+  AcquireSRWLockExclusive(&g_tss_lock);
+  *guard = 0;
+  ReleaseSRWLockExclusive(&g_tss_lock);
+  WakeAllConditionVariable(&g_tss_cv);
+}
+static void stub_operator_delete_sized(void *ptr, size_t) { free(ptr); }
+
+static void *FindStaticCRTSymbol(const std::string &Name) {
+  if (Name == "_Init_thread_header")
+    return reinterpret_cast<void *>(&stub_Init_thread_header);
+  if (Name == "_Init_thread_footer")
+    return reinterpret_cast<void *>(&stub_Init_thread_footer);
+  if (Name == "_Init_thread_abort")
+    return reinterpret_cast<void *>(&stub_Init_thread_abort);
+  if (Name == "??3@YAXPEAX_K@Z")
+    return reinterpret_cast<void *>(&stub_operator_delete_sized);
+  if (Name == "??_7type_info@@6B@") {
+    const std::type_info &ti = typeid(int);
+    static void *vtable = *reinterpret_cast<void *const *>(&ti);
+    return vtable;
+  }
+  return nullptr;
+}
+#endif
 
 // Custom error-reporting definition generator that logs everything
 class DebugDefinitionGenerator : public DefinitionGenerator {
@@ -63,6 +113,7 @@ public:
         fprintf(stderr, "    -> __imp_ prefix detected, real name: '%s'\n",
                 RealName.c_str());
 
+        void *resolved = nullptr;
         // Try each runtime DLL
         static const char *kDLLs[] = {
             "vcruntime140.dll", "vcruntime140_1.dll", "ucrtbase.dll",
@@ -70,79 +121,81 @@ public:
         };
         for (const char *dll : kDLLs) {
           HMODULE hMod = LoadLibraryA(dll);
-          if (!hMod) {
-            fprintf(stderr, "    -> LoadLibraryA('%s') FAILED\n", dll);
-            continue;
-          }
+          if (!hMod) continue;
           FARPROC addr = GetProcAddress(hMod, RealName.c_str());
-          fprintf(stderr, "    -> GetProcAddress(%s, '%s') = %p\n", dll,
-                  RealName.c_str(), (void *)addr);
           if (addr) {
-            // Create a stub: allocate a pointer that holds the function address
-            auto *stub = new uint64_t(reinterpret_cast<uint64_t>(addr));
-            NewSymbols[Name] = {ExecutorAddr::fromPtr(stub),
-                                JITSymbolFlags::Exported};
-            fprintf(stderr, "    -> RESOLVED via __imp_ stub\n");
+            fprintf(stderr, "    -> Found in %s at %p\n", dll, (void *)addr);
+            resolved = reinterpret_cast<void *>(addr);
             break;
           }
         }
+        // Fallback: static CRT stubs
+        if (!resolved) resolved = FindStaticCRTSymbol(RealName);
+        if (resolved) {
+          auto *stub = new uint64_t(reinterpret_cast<uint64_t>(resolved));
+          NewSymbols[Name] = {ExecutorAddr::fromPtr(stub),
+                              JITSymbolFlags::Exported};
+          fprintf(stderr, "    -> RESOLVED __imp_ stub at %p\n", resolved);
+        } else {
+          fprintf(stderr, "    -> NOT FOUND ANYWHERE\n");
+        }
       } else {
         // Direct symbol lookup
-        // Try runtime DLLs first
+        void *resolved = nullptr;
         static const char *kDLLs[] = {
             "vcruntime140.dll", "vcruntime140_1.dll", "ucrtbase.dll",
             "msvcp140.dll",
         };
         for (const char *dll : kDLLs) {
           HMODULE hMod = LoadLibraryA(dll);
-          if (!hMod)
-            continue;
+          if (!hMod) continue;
           FARPROC addr = GetProcAddress(hMod, NameStr.str().c_str());
           if (addr) {
             fprintf(stderr, "    -> Found in %s at %p\n", dll, (void *)addr);
-            NewSymbols[Name] = {ExecutorAddr::fromPtr(addr),
-                                JITSymbolFlags::Exported};
+            resolved = reinterpret_cast<void *>(addr);
             break;
           }
         }
 
-        if (NewSymbols.find(Name) == NewSymbols.end()) {
+        if (!resolved) {
           // Try all loaded modules
           HMODULE hMods[1024];
           DWORD cbNeeded;
           if (EnumProcessModules(GetCurrentProcess(), hMods, sizeof(hMods),
                                  &cbNeeded)) {
             DWORD count = cbNeeded / sizeof(HMODULE);
-            if (count > 1024)
-              count = 1024;
+            if (count > 1024) count = 1024;
             for (DWORD i = 0; i < count; ++i) {
-              FARPROC addr =
-                  GetProcAddress(hMods[i], NameStr.str().c_str());
+              FARPROC addr = GetProcAddress(hMods[i], NameStr.str().c_str());
               if (addr) {
                 char modName[260];
                 GetModuleFileNameA(hMods[i], modName, sizeof(modName));
                 fprintf(stderr, "    -> Found in module '%s' at %p\n", modName,
                         (void *)addr);
-                NewSymbols[Name] = {ExecutorAddr::fromPtr(addr),
-                                    JITSymbolFlags::Exported};
+                resolved = reinterpret_cast<void *>(addr);
                 break;
               }
             }
           }
         }
 
-        if (NewSymbols.find(Name) == NewSymbols.end()) {
-          // Try LLVM's DynamicLibrary
-          void *addr =
-              sys::DynamicLibrary::SearchForAddressOfSymbol(NameStr.str());
+        if (!resolved) {
+          void *addr = sys::DynamicLibrary::SearchForAddressOfSymbol(NameStr.str());
           if (addr) {
-            fprintf(stderr, "    -> Found via LLVM SearchForAddressOfSymbol: %p\n",
-                    addr);
-            NewSymbols[Name] = {ExecutorAddr::fromPtr(addr),
-                                JITSymbolFlags::Exported};
-          } else {
-            fprintf(stderr, "    -> NOT FOUND ANYWHERE\n");
+            fprintf(stderr, "    -> Found via LLVM SearchForAddressOfSymbol: %p\n", addr);
+            resolved = addr;
           }
+        }
+
+        // Fallback: static CRT stubs
+        if (!resolved) resolved = FindStaticCRTSymbol(NameStr.str());
+
+        if (resolved) {
+          NewSymbols[Name] = {ExecutorAddr::fromPtr(resolved),
+                              JITSymbolFlags::Exported};
+          fprintf(stderr, "    -> RESOLVED at %p\n", resolved);
+        } else {
+          fprintf(stderr, "    -> NOT FOUND ANYWHERE\n");
         }
       }
 #endif

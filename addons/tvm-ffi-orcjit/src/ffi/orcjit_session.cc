@@ -38,6 +38,7 @@
 #include <tvm/ffi/reflection/registry.h>
 
 #include <cstddef>
+#include <typeinfo>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -237,6 +238,64 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
 };
 
 #ifdef _WIN32
+// ---- Static CRT symbol stubs ----
+// The MSVC C++ runtime is split: vcruntime140.dll exports a subset, while
+// symbols like _Init_thread_header, operator delete(void*,size_t), and the
+// type_info vtable live only in the static vcruntime.lib. Since we link COFF
+// objects at runtime via JITLink (no static lib linking), we provide our own
+// implementations of these symbols.
+
+// Thread-safe static initialization (C++11 magic statics).
+// Protocol: guard==0 → uninitialized, guard==-1 → being initialized, guard==1 → done.
+static SRWLOCK g_tss_lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE g_tss_cv = CONDITION_VARIABLE_INIT;
+
+static void stub_Init_thread_header(int* guard) {
+  AcquireSRWLockExclusive(&g_tss_lock);
+  if (*guard == 0) {
+    *guard = -1;  // caller will initialize
+  } else {
+    while (*guard == -1) {
+      SleepConditionVariableSRW(&g_tss_cv, &g_tss_lock, INFINITE, 0);
+    }
+  }
+  ReleaseSRWLockExclusive(&g_tss_lock);
+}
+
+static void stub_Init_thread_footer(int* guard) {
+  AcquireSRWLockExclusive(&g_tss_lock);
+  *guard = 1;
+  ReleaseSRWLockExclusive(&g_tss_lock);
+  WakeAllConditionVariable(&g_tss_cv);
+}
+
+static void stub_Init_thread_abort(int* guard) {
+  AcquireSRWLockExclusive(&g_tss_lock);
+  *guard = 0;
+  ReleaseSRWLockExclusive(&g_tss_lock);
+  WakeAllConditionVariable(&g_tss_cv);
+}
+
+// Sized deallocation: operator delete(void*, size_t) — ??3@YAXPEAX_K@Z
+static void stub_operator_delete_sized(void* ptr, size_t) { free(ptr); }
+
+// type_info vtable: ??_7type_info@@6B@
+// Extract from the host process's own statically-linked type_info.
+static void* get_type_info_vtable() {
+  const std::type_info& ti = typeid(int);
+  return *reinterpret_cast<void* const*>(&ti);
+}
+
+// Look up symbols that exist only in vcruntime's static library.
+static void* FindStaticCRTSymbol(const std::string& Name) {
+  if (Name == "_Init_thread_header") return reinterpret_cast<void*>(&stub_Init_thread_header);
+  if (Name == "_Init_thread_footer") return reinterpret_cast<void*>(&stub_Init_thread_footer);
+  if (Name == "_Init_thread_abort") return reinterpret_cast<void*>(&stub_Init_thread_abort);
+  if (Name == "??3@YAXPEAX_K@Z") return reinterpret_cast<void*>(&stub_operator_delete_sized);
+  if (Name == "??_7type_info@@6B@") return get_type_info_vtable();
+  return nullptr;
+}
+
 /*!
  * \brief Custom definition generator for Windows DLL import symbols.
  *
@@ -314,7 +373,11 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
         // DLL import stub: resolve the underlying symbol, create a pointer indirection
         std::string RealName = NameStr.drop_front(6).str();
         fprintf(stderr, "[DLLGen]   __imp_ prefix -> looking up '%s'\n", RealName.c_str());
-        if (void* Addr = FindInProcessModules(RealName)) {
+        void* Addr = FindInProcessModules(RealName);
+        if (!Addr) Addr = FindStaticCRTSymbol(RealName);
+        if (Addr) {
+          fprintf(stderr, "[DLLGen]   -> creating __imp_ stub for '%s' at %p\n",
+                  RealName.c_str(), Addr);
           auto stub = std::make_unique<uint64_t>(reinterpret_cast<uint64_t>(Addr));
           NewSymbols[Name] = {llvm::orc::ExecutorAddr::fromPtr(stub.get()),
                               llvm::JITSymbolFlags::Exported};
@@ -329,7 +392,10 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
         fprintf(stderr, "[DLLGen]   Provided _tls_index = %lu\n", jit_tls_index);
       } else {
         // Try to find the symbol in any loaded process module
-        if (void* Addr = FindInProcessModules(NameStr.str())) {
+        void* Addr = FindInProcessModules(NameStr.str());
+        if (!Addr) Addr = FindStaticCRTSymbol(NameStr.str());
+        if (Addr) {
+          fprintf(stderr, "[DLLGen]   -> resolved '%s' at %p\n", NameStr.str().c_str(), Addr);
           NewSymbols[Name] = {llvm::orc::ExecutorAddr::fromPtr(Addr),
                               llvm::JITSymbolFlags::Exported};
         }
