@@ -137,7 +137,14 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
             BaseAddr = B->getAddress();
           }
         }
+        fprintf(stderr, "[OrcJIT] Setting __ImageBase = 0x%llx for graph '%s'\n",
+                (unsigned long long)BaseAddr.getValue(), G.getName().c_str());
+        fflush(stderr);
         ImageBase->getAddressable().setAddress(BaseAddr);
+      } else {
+        fprintf(stderr, "[OrcJIT] __ImageBase not found in external symbols for '%s'\n",
+                G.getName().c_str());
+        fflush(stderr);
       }
       // Strip .pdata/.xdata edges: external handlers may be >4GB from
       // __ImageBase, and we don't register SEH data anyway.
@@ -370,6 +377,8 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
   llvm::orc::ObjectLinkingLayer& L_;
 
   static void* FindInProcessModules(const std::string& Name) {
+    // Try specific runtime DLLs first, then tvm_ffi.dll (loaded by Python),
+    // then all process modules, then LLVM's search.
     static const char* kRuntimeDLLs[] = {
         "vcruntime140.dll", "vcruntime140_1.dll", "ucrtbase.dll", "msvcp140.dll",
     };
@@ -378,6 +387,12 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
         if (auto addr = GetProcAddress(hMod, Name.c_str())) {
           return reinterpret_cast<void*>(addr);
         }
+      }
+    }
+    // Also check tvm_ffi.dll (host process symbol provider)
+    if (HMODULE hTvmFfi = GetModuleHandleA("tvm_ffi.dll")) {
+      if (auto addr = GetProcAddress(hTvmFfi, Name.c_str())) {
+        return reinterpret_cast<void*>(addr);
       }
     }
     HMODULE hMods[1024];
@@ -406,6 +421,8 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
                             llvm::orc::JITDylibLookupFlags JDLookupFlags,
                             const llvm::orc::SymbolLookupSet& LookupSet) override {
     // Step 1: Collect unique base names (strip __imp_ prefix) and resolve addresses.
+    fprintf(stderr, "[DLLImport] tryToGenerate: %zu symbols requested\n", LookupSet.size());
+    fflush(stderr);
     llvm::DenseMap<llvm::orc::SymbolStringPtr, llvm::orc::ExecutorAddr> Resolved;
     for (auto& [Name, Flags] : LookupSet) {
       llvm::StringRef NameStr = *Name;
@@ -417,14 +434,19 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
       if (BaseName == "_tls_index") {
         static DWORD jit_tls_index = TlsAlloc();
         Resolved[InternedBase] = llvm::orc::ExecutorAddr::fromPtr(&jit_tls_index);
+        fprintf(stderr, "[DLLImport]   %s -> _tls_index stub\n", BaseName.c_str());
         continue;
       }
       void* Addr = FindInProcessModules(BaseName);
       if (!Addr) Addr = FindStaticCRTSymbol(BaseName);
       if (Addr) {
         Resolved[InternedBase] = llvm::orc::ExecutorAddr::fromPtr(Addr);
+        fprintf(stderr, "[DLLImport]   %s -> %p\n", BaseName.c_str(), Addr);
+      } else {
+        fprintf(stderr, "[DLLImport]   %s -> NOT FOUND\n", BaseName.c_str());
       }
     }
+    fflush(stderr);
     if (Resolved.empty()) return llvm::Error::success();
 
     // Step 2: Build a LinkGraph with __imp_ pointers and PLT jump stubs.

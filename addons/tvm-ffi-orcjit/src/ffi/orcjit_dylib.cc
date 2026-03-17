@@ -38,6 +38,8 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 
+#include <cstdio>
+
 #include "orcjit_session.h"
 #include "orcjit_utils.h"
 
@@ -150,11 +152,23 @@ Optional<Function> ORCJITDynamicLibraryObj::GetFunction(const String& name) {
   if (void* symbol = GetSymbol(symbol_name)) {
     // Wrap C function pointer as tvm-ffi Function
     TVMFFISafeCallType c_func = reinterpret_cast<TVMFFISafeCallType>(symbol);
-
+#ifdef _WIN32
+    fprintf(stderr, "[OrcJIT] GetFunction('%s') -> symbol at %p\n", name.c_str(), symbol);
+    fflush(stderr);
+#endif
     return Function::FromPacked([c_func](PackedArgs args, Any* rv) {
       TVM_FFI_ICHECK_LT(rv->type_index(), ffi::TypeIndex::kTVMFFIStaticObjectBegin);
+#ifdef _WIN32
+      fprintf(stderr, "[OrcJIT] Calling JIT function at %p with %d args...\n",
+              reinterpret_cast<const void*>(c_func), static_cast<int>(args.size()));
+      fflush(stderr);
+#endif
       TVM_FFI_CHECK_SAFE_CALL((*c_func)(nullptr, reinterpret_cast<const TVMFFIAny*>(args.data()),
                                         args.size(), reinterpret_cast<TVMFFIAny*>(rv)));
+#ifdef _WIN32
+      fprintf(stderr, "[OrcJIT] JIT function returned successfully\n");
+      fflush(stderr);
+#endif
     });
   }
   return std::nullopt;
