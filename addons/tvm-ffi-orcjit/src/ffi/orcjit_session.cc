@@ -408,8 +408,10 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
     auto G = std::make_unique<llvm::jitlink::LinkGraph>(
         "<DLL_IMPORT_STUBS>", ES_.getSymbolStringPool(), ES_.getTargetTriple(),
         llvm::SubtargetFeatures(), llvm::jitlink::getGenericEdgeKindName);
-    auto& Sec =
-        G->createSection("__dll_stubs", llvm::orc::MemProt::Read | llvm::orc::MemProt::Exec);
+    auto Prot = static_cast<llvm::orc::MemProt>(
+        static_cast<unsigned>(llvm::orc::MemProt::Read) |
+        static_cast<unsigned>(llvm::orc::MemProt::Exec));
+    auto& Sec = G->createSection("__dll_stubs", Prot);
 
     for (auto& [InternedName, Addr] : Resolved) {
       // Absolute symbol at the real address (local to this graph)
