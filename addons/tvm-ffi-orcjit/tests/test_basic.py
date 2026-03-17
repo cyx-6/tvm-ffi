@@ -62,6 +62,27 @@ def test_create_library() -> None:
     assert lib is not None
 
 
+def test_load_and_execute_c_function() -> None:
+    """Test loading a pure C object file and executing a function.
+
+    Uses the TVMFFISafeCallType C ABI directly, with no C++ runtime
+    dependencies. This isolates JIT infrastructure from MSVC CRT issues.
+    """
+    obj_file = get_test_obj_file("test_funcs_c.o")
+
+    session = ExecutionSession()
+    lib = session.create_library()
+    lib.add(str(obj_file))
+
+    add_func = lib.get_function("test_add_c")
+    result = add_func(10, 20)
+    assert result == 30
+
+    mul_func = lib.get_function("test_multiply_c")
+    result = mul_func(7, 6)
+    assert result == 42
+
+
 def test_load_and_execute_function() -> None:
     """Test loading an object file and executing a function."""
     # Get pre-built test object file

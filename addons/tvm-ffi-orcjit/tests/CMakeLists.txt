@@ -81,6 +81,17 @@ install(
   RENAME test_ctor_dtor.o
 )
 
+# Create object library for pure C test functions (no C++ runtime deps)
+enable_language(C)
+add_library(test_funcs_c_obj OBJECT sources/test_funcs_c.c)
+target_link_libraries(test_funcs_c_obj PRIVATE tvm_ffi::header)
+target_compile_options(test_funcs_c_obj PRIVATE -O2)
+install(
+  FILES $<TARGET_OBJECTS:test_funcs_c_obj>
+  DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
+  RENAME test_funcs_c.o
+)
+
 find_package(CUDAToolkit)
 
 if (CUDAToolkit_FOUND)
