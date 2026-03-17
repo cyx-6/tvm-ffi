@@ -109,15 +109,38 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
       return llvm::Error::success();
     });
 #ifdef _WIN32
-    // On Windows, .pdata (procedure data / unwind info) and .xdata (exception
-    // handler data) sections use IMAGE_REL_AMD64_ADDR32NB relocations which
-    // compute (target - __ImageBase) as a 32-bit value.  Without COFFPlatform:
-    //   - __ImageBase has no meaningful value (JIT code has no PE image base)
-    //   - External targets like __CxxFrameHandler3 (in vcruntime140.dll) are
-    //     too far from JIT memory for 32-bit offsets
-    //   - We never call RtlAddFunctionTable, so SEH data is unused anyway
-    // Remove all relocation edges from these sections to avoid Pointer32 overflow.
+    // Without COFFPlatform, __ImageBase (used by IMAGE_REL_AMD64_ADDR32NB /
+    // Pointer32NB relocations) defaults to 0. This causes all Pointer32 fixups
+    // to overflow since JIT addresses don't fit in 32 bits.
+    //
+    // Fix: set __ImageBase to the lowest block address in the graph after
+    // allocation. This makes all intra-graph Pointer32NB offsets small.
+    //
+    // Also strip .pdata/.xdata edges: SEH unwind data references external
+    // handlers (e.g., __CxxFrameHandler3) in DLLs that may be >4GB from
+    // __ImageBase. Since we don't call RtlAddFunctionTable, SEH data is
+    // unused anyway.
     Config.PostAllocationPasses.emplace_back([](llvm::jitlink::LinkGraph& G) {
+      // Set __ImageBase to the lowest allocated block address.
+      auto ImageBaseName = G.intern("__ImageBase");
+      llvm::jitlink::Symbol* ImageBase = nullptr;
+      for (auto* Sym : G.external_symbols()) {
+        if (Sym->getName() == ImageBaseName) {
+          ImageBase = Sym;
+          break;
+        }
+      }
+      if (ImageBase) {
+        llvm::orc::ExecutorAddr BaseAddr;
+        for (auto* B : G.blocks()) {
+          if (!BaseAddr || B->getAddress() < BaseAddr) {
+            BaseAddr = B->getAddress();
+          }
+        }
+        ImageBase->getAddressable().setAddress(BaseAddr);
+      }
+      // Strip .pdata/.xdata edges: external handlers may be >4GB from
+      // __ImageBase, and we don't register SEH data anyway.
       for (auto& Sec : G.sections()) {
         if (Sec.getName() == ".pdata" || Sec.getName().starts_with(".xdata")) {
           for (auto* B : Sec.blocks()) {
