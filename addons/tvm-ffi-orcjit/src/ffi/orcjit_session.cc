@@ -24,6 +24,8 @@
 
 #include "orcjit_session.h"
 
+#include <llvm/ExecutionEngine/JITLink/JITLink.h>
+#include <llvm/ExecutionEngine/JITLink/x86_64.h>
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
@@ -32,6 +34,7 @@
 #include <llvm/Support/DynamicLibrary.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
+#include <llvm/TargetParser/SubtargetFeature.h>
 #include <tvm/ffi/cast.h>
 #include <tvm/ffi/error.h>
 #include <tvm/ffi/object.h>
@@ -322,39 +325,38 @@ static void* FindStaticCRTSymbol(const std::string& Name) {
  * \brief Custom definition generator for Windows DLL import symbols.
  *
  * On Windows with the MSVC ABI, COFF objects reference DLL-imported symbols
- * via __imp_XXX pointer stubs. Without COFFPlatform (which we skip due to
- * MSVC CRT dependency issues), JITLink cannot resolve these. This generator:
+ * via __imp_XXX pointer stubs and direct calls. Without COFFPlatform (which
+ * we skip due to MSVC CRT dependency issues), JITLink cannot resolve these.
  *
- * 1. For __imp_XXX: strips the prefix, finds XXX in all loaded process
- *    modules via EnumProcessModules + GetProcAddress, allocates a pointer
- *    stub, and defines __imp_XXX pointing to it.
- * 2. For _tls_index: provides a real TLS slot allocated via TlsAlloc().
- * 3. For other symbols: searches all loaded process modules directly.
+ * For each resolved symbol, this generator creates a JIT-allocated LinkGraph
+ * containing:
+ *   - __imp_XXX: a GOT-like pointer entry holding the real address
+ *   - XXX: a PLT-like jump stub (`jmp [__imp_XXX]`) for direct calls
  *
- * This covers MSVC C++ runtime symbols (vcruntime140.dll, msvcp140.dll,
- * ucrtbase.dll) and TVM-FFI exports that the default process-symbol
- * generator misses (it only searches the main exe module on Windows).
+ * By allocating stubs in JIT memory (rather than using absoluteSymbols at
+ * host-process addresses), all PCRel32 fixups from JIT code reach safely.
+ *
+ * Symbol search order:
+ *   1. Specific MSVC runtime DLLs (vcruntime140, ucrtbase, msvcp140)
+ *   2. All loaded process modules (EnumProcessModules)
+ *   3. LLVM's SearchForAddressOfSymbol
+ *   4. Static CRT stubs (_Init_thread_*, operator delete, type_info vtable)
  */
 class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
-  std::vector<std::unique_ptr<uint64_t>> imp_stubs_;
+  llvm::orc::ExecutionSession& ES_;
+  llvm::orc::ObjectLinkingLayer& L_;
 
   static void* FindInProcessModules(const std::string& Name) {
-    // First: check specific MSVC runtime DLLs via LoadLibraryA (ensures the
-    // handle is valid even if the DLL was loaded under a different path).
     static const char* kRuntimeDLLs[] = {
         "vcruntime140.dll", "vcruntime140_1.dll", "ucrtbase.dll", "msvcp140.dll",
     };
     for (const char* dll : kRuntimeDLLs) {
       if (HMODULE hMod = LoadLibraryA(dll)) {
         if (auto addr = GetProcAddress(hMod, Name.c_str())) {
-          fprintf(stderr, "[DLLGen] Found '%s' in %s at %p\n", Name.c_str(), dll,
-                  reinterpret_cast<void*>(addr));
           return reinterpret_cast<void*>(addr);
         }
       }
     }
-    // Then: enumerate all loaded modules to find symbols in other DLLs
-    // (e.g., tvm_ffi Python extension, kernel32.dll, etc.)
     HMODULE hMods[1024];
     DWORD cbNeeded;
     if (EnumProcessModules(GetCurrentProcess(), hMods, sizeof(hMods), &cbNeeded)) {
@@ -362,71 +364,70 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
       if (count > 1024) count = 1024;
       for (DWORD i = 0; i < count; ++i) {
         if (auto addr = GetProcAddress(hMods[i], Name.c_str())) {
-          char modName[260];
-          GetModuleFileNameA(hMods[i], modName, sizeof(modName));
-          fprintf(stderr, "[DLLGen] Found '%s' in module '%s' at %p\n", Name.c_str(), modName,
-                  reinterpret_cast<void*>(addr));
           return reinterpret_cast<void*>(addr);
         }
       }
     }
-    // Final fallback: LLVM's dynamic library search
     if (void* addr = llvm::sys::DynamicLibrary::SearchForAddressOfSymbol(Name)) {
-      fprintf(stderr, "[DLLGen] Found '%s' via LLVM SearchForAddressOfSymbol at %p\n", Name.c_str(),
-              addr);
       return addr;
     }
-    fprintf(stderr, "[DLLGen] FAILED to find '%s' in any module\n", Name.c_str());
     return nullptr;
   }
 
  public:
+  DLLImportDefinitionGenerator(llvm::orc::ExecutionSession& ES, llvm::orc::ObjectLinkingLayer& L)
+      : ES_(ES), L_(L) {}
+
   llvm::Error tryToGenerate(llvm::orc::LookupState& LS, llvm::orc::LookupKind K,
                             llvm::orc::JITDylib& JD,
                             llvm::orc::JITDylibLookupFlags JDLookupFlags,
                             const llvm::orc::SymbolLookupSet& LookupSet) override {
-    fprintf(stderr, "[DLLGen] tryToGenerate called with %zu symbols on JD '%s'\n", LookupSet.size(),
-            JD.getName().c_str());
-    llvm::orc::SymbolMap NewSymbols;
+    // Step 1: Collect unique base names (strip __imp_ prefix) and resolve addresses.
+    llvm::DenseMap<llvm::orc::SymbolStringPtr, llvm::orc::ExecutorAddr> Resolved;
     for (auto& [Name, Flags] : LookupSet) {
       llvm::StringRef NameStr = *Name;
-      fprintf(stderr, "[DLLGen] Processing: '%s'\n", NameStr.str().c_str());
-      if (NameStr.starts_with("__imp_")) {
-        // DLL import stub: resolve the underlying symbol, create a pointer indirection
-        std::string RealName = NameStr.drop_front(6).str();
-        fprintf(stderr, "[DLLGen]   __imp_ prefix -> looking up '%s'\n", RealName.c_str());
-        void* Addr = FindInProcessModules(RealName);
-        if (!Addr) Addr = FindStaticCRTSymbol(RealName);
-        if (Addr) {
-          fprintf(stderr, "[DLLGen]   -> creating __imp_ stub for '%s' at %p\n",
-                  RealName.c_str(), Addr);
-          auto stub = std::make_unique<uint64_t>(reinterpret_cast<uint64_t>(Addr));
-          NewSymbols[Name] = {llvm::orc::ExecutorAddr::fromPtr(stub.get()),
-                              llvm::JITSymbolFlags::Exported};
-          imp_stubs_.push_back(std::move(stub));
-        }
-      } else if (NameStr == "_tls_index") {
-        // _tls_index is a per-module variable set by the PE loader during DLL
-        // loading. JIT code has no PE loader, so we allocate a real TLS slot.
+      std::string BaseName =
+          NameStr.starts_with("__imp_") ? NameStr.drop_front(6).str() : NameStr.str();
+      if (BaseName == "__ImageBase") continue;
+      auto InternedBase = ES_.intern(BaseName);
+      if (Resolved.count(InternedBase)) continue;
+      if (BaseName == "_tls_index") {
         static DWORD jit_tls_index = TlsAlloc();
-        NewSymbols[Name] = {llvm::orc::ExecutorAddr::fromPtr(&jit_tls_index),
-                            llvm::JITSymbolFlags::Exported};
-        fprintf(stderr, "[DLLGen]   Provided _tls_index = %lu\n", jit_tls_index);
-      } else {
-        // Try to find the symbol in any loaded process module
-        void* Addr = FindInProcessModules(NameStr.str());
-        if (!Addr) Addr = FindStaticCRTSymbol(NameStr.str());
-        if (Addr) {
-          fprintf(stderr, "[DLLGen]   -> resolved '%s' at %p\n", NameStr.str().c_str(), Addr);
-          NewSymbols[Name] = {llvm::orc::ExecutorAddr::fromPtr(Addr),
-                              llvm::JITSymbolFlags::Exported};
-        }
+        Resolved[InternedBase] = llvm::orc::ExecutorAddr::fromPtr(&jit_tls_index);
+        continue;
+      }
+      void* Addr = FindInProcessModules(BaseName);
+      if (!Addr) Addr = FindStaticCRTSymbol(BaseName);
+      if (Addr) {
+        Resolved[InternedBase] = llvm::orc::ExecutorAddr::fromPtr(Addr);
       }
     }
-    fprintf(stderr, "[DLLGen] Resolved %zu of %zu symbols\n", NewSymbols.size(), LookupSet.size());
-    if (!NewSymbols.empty())
-      return JD.define(llvm::orc::absoluteSymbols(std::move(NewSymbols)));
-    return llvm::Error::success();
+    if (Resolved.empty()) return llvm::Error::success();
+
+    // Step 2: Build a LinkGraph with __imp_ pointers and PLT jump stubs.
+    auto G = std::make_unique<llvm::jitlink::LinkGraph>(
+        "<DLL_IMPORT_STUBS>", ES_.getSymbolStringPool(), ES_.getTargetTriple(),
+        llvm::SubtargetFeatures(), llvm::jitlink::getGenericEdgeKindName);
+    auto& Sec =
+        G->createSection("__dll_stubs", llvm::orc::MemProt::Read | llvm::orc::MemProt::Exec);
+
+    for (auto& [InternedName, Addr] : Resolved) {
+      // Absolute symbol at the real address (local to this graph)
+      auto& Target = G->addAbsoluteSymbol(
+          G->intern(("__real_" + *InternedName).str()), Addr, G->getPointerSize(),
+          llvm::jitlink::Linkage::Strong, llvm::jitlink::Scope::Local, false);
+      // __imp_XXX pointer (GOT-like entry)
+      auto& Ptr = llvm::jitlink::x86_64::createAnonymousPointer(*G, Sec, &Target);
+      Ptr.setName(G->intern(("__imp_" + *InternedName).str()));
+      Ptr.setLinkage(llvm::jitlink::Linkage::Strong);
+      Ptr.setScope(llvm::jitlink::Scope::Default);
+      // XXX jump stub (PLT-like entry) for direct calls
+      auto& StubBlock = llvm::jitlink::x86_64::createPointerJumpStubBlock(*G, Sec, Ptr);
+      G->addDefinedSymbol(StubBlock, 0, *InternedName, StubBlock.getSize(),
+                          llvm::jitlink::Linkage::Strong, llvm::jitlink::Scope::Default, true,
+                          false);
+    }
+    return L_.add(JD, std::move(G));
   }
 };
 #endif  // _WIN32
@@ -495,7 +496,10 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
   // msvcp140, ucrtbase, tvm_ffi, etc.) and creates __imp_* pointer stubs.
   if (auto PSG = jit_->getProcessSymbolsJITDylib()) {
     fprintf(stderr, "[OrcJIT] ProcessSymbols JITDylib found: '%s'\n", PSG->getName().c_str());
-    PSG->addGenerator(std::make_unique<DLLImportDefinitionGenerator>());
+    auto& ObjLayer =
+        static_cast<llvm::orc::ObjectLinkingLayer&>(jit_->getObjLinkingLayer());
+    PSG->addGenerator(std::make_unique<DLLImportDefinitionGenerator>(
+        jit_->getExecutionSession(), ObjLayer));
     fprintf(stderr, "[OrcJIT] Added DLLImportDefinitionGenerator\n");
   } else {
     fprintf(stderr, "[OrcJIT] WARNING: ProcessSymbols JITDylib is NULL!\n");
