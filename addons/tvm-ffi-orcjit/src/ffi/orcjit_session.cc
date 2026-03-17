@@ -105,6 +105,28 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
       }
       return llvm::Error::success();
     });
+#ifdef _WIN32
+    // On Windows, .pdata (procedure data / unwind info) and .xdata (exception
+    // handler data) sections use IMAGE_REL_AMD64_ADDR32NB relocations which
+    // compute (target - __ImageBase) as a 32-bit value.  Without COFFPlatform:
+    //   - __ImageBase has no meaningful value (JIT code has no PE image base)
+    //   - External targets like __CxxFrameHandler3 (in vcruntime140.dll) are
+    //     too far from JIT memory for 32-bit offsets
+    //   - We never call RtlAddFunctionTable, so SEH data is unused anyway
+    // Remove all relocation edges from these sections to avoid Pointer32 overflow.
+    Config.PostAllocationPasses.emplace_back([](llvm::jitlink::LinkGraph& G) {
+      for (auto& Sec : G.sections()) {
+        if (Sec.getName() == ".pdata" || Sec.getName().starts_with(".xdata")) {
+          for (auto* B : Sec.blocks()) {
+            while (!B->edges_empty()) {
+              B->removeEdge(B->edges().begin());
+            }
+          }
+        }
+      }
+      return llvm::Error::success();
+    });
+#endif
     // After fixups, read resolved function pointers from all init/fini data sections.
     // Handles ELF (.init_array, .ctors, .fini_array, .dtors),
     // Mach-O (__DATA,__mod_init_func, __DATA,__mod_term_func),
