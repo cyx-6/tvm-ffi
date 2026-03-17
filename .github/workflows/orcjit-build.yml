@@ -94,9 +94,7 @@ jobs:
             cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=C:/opt/llvm/Library/bin/clang.exe -DCMAKE_CXX_COMPILER=C:/opt/llvm/Library/bin/clang++.exe -DPython_EXECUTABLE=%PYTHON% &&
             cmake --build build &&
             popd &&
-            (echo "=== DEBUG: Dump undefined symbols from test objects ===" && C:\opt\llvm\Library\bin\llvm-objdump.exe -t {project}\addons\tvm-ffi-orcjit\tests\test_funcs.o 2>&1 || echo "llvm-objdump failed") &&
-            (echo "=== DEBUG: Run Python symbol diagnostics ===" && python {project}\addons\tvm-ffi-orcjit\tools\debug_win_symbols.py 2>&1 || echo "Python debug script failed") &&
-            (echo "=== DEBUG: Build standalone LLVM JIT test ===" && pushd {project}\addons\tvm-ffi-orcjit\tools && copy debug_win_jit_CMakeLists.txt CMakeLists.txt && cmake -B build_debug -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=C:/opt/llvm/Library/bin/clang.exe -DCMAKE_CXX_COMPILER=C:/opt/llvm/Library/bin/clang++.exe -DCMAKE_PREFIX_PATH=C:/opt/llvm/Library && cmake --build build_debug && echo "=== DEBUG: Run standalone LLVM JIT test ===" && build_debug\debug_win_jit.exe {project}\addons\tvm-ffi-orcjit\tests\test_funcs.o 2>&1 && popd || echo "Standalone LLVM JIT test failed")
+            (echo "=== Verify llvm-jitlink + ORC runtime on Windows ===" && python {project}\addons\tvm-ffi-orcjit\tools\test_llvm_jitlink.py 2>&1 || echo "llvm-jitlink verification failed")
           CIBW_TEST_COMMAND: >-
             pytest {project}/addons/tvm-ffi-orcjit/tests -v &&
             (cd {project}/addons/tvm-ffi-orcjit/examples/quick-start &&
