@@ -48,6 +48,7 @@ cpp_source = """
 #endif
 #ifdef BUILD_WITH_ROCM
 #include <c10/hip/HIPStream.h>
+#include <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>
 #endif
 
 using namespace std;
@@ -506,8 +507,14 @@ struct TorchDLPackExchangeAPI : public DLPackExchangeAPI {
   // Get current CUDA/ROCm work stream
   static int CurrentWorkStream(DLDeviceType device_type, int32_t device_id, void** out_stream) {
     try {
+#ifdef BUILD_WITH_ROCM
+      if (device_type == kDLROCM || device_type == kDLCUDA) {
+        *out_stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA(device_id).stream();
+        return 0;
+      }
+#endif
 #ifdef BUILD_WITH_CUDA
-      if (device_type == kDLCUDA || device_type == kDLROCM) {
+      if (device_type == kDLCUDA) {
         *out_stream = at::cuda::getCurrentCUDAStream(device_id).stream();
         return 0;
       }
@@ -716,7 +723,7 @@ def get_torch_include_paths(build_with_cuda: bool) -> Sequence[str]:
             device_type="cuda" if build_with_cuda else "cpu"
         )
     else:
-        return torch.utils.cpp_extension.include_paths(cuda=build_with_cuda)  # type: ignore[call-arg]
+        return torch.utils.cpp_extension.include_paths(cuda=build_with_cuda)  # ty: ignore[unknown-argument]
 
 
 def main() -> None:  # noqa: PLR0912, PLR0915

@@ -41,7 +41,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)  # type: ignore
+logger = logging.getLogger(__name__)
 
 
 def _create_dlpack_exchange_api_capsule(ptr_as_int: int) -> Any:
@@ -92,8 +92,10 @@ def _check_and_update_dlpack_c_exchange_api(tensor_cls: object) -> bool:
 def load_torch_c_dlpack_extension() -> Any:  # noqa: PLR0912, PLR0915
     try:
         import torch  # noqa: PLC0415
+        import torch.version  # noqa: PLC0415
 
-        if _check_and_update_dlpack_c_exchange_api(torch.Tensor):
+        prefer_rocm_override = bool(torch.cuda.is_available() and torch.version.hip is not None)
+        if _check_and_update_dlpack_c_exchange_api(torch.Tensor) and not prefer_rocm_override:
             # skip loading the extension if the __dlpack_c_exchange_api__
             # attribute is already set so we don't have to do it in
             # newer version of PyTorch
@@ -103,11 +105,16 @@ def load_torch_c_dlpack_extension() -> Any:  # noqa: PLR0912, PLR0915
 
     """Load the torch c dlpack extension."""
     try:
-        import torch_c_dlpack_ext  # type: ignore  # noqa: PLC0415, F401
+        import torch_c_dlpack_ext  # noqa: PLC0415, F401
 
-        if _check_and_update_dlpack_c_exchange_api(torch.Tensor):
+        if _check_and_update_dlpack_c_exchange_api(torch.Tensor) and not prefer_rocm_override:
             return None
     except ImportError:
+        pass
+    except AttributeError:
+        # When torch_c_dlpack_ext and torch have different ABI
+        # `ctypes.CDLL` will raise an `AttributeError`.
+        # Keep trying JIT
         pass
 
     try:

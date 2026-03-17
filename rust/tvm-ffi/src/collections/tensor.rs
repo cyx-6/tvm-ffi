@@ -148,16 +148,21 @@ impl Tensor {
             ))
         }
     }
-    /// Get the data as a mutable slice
+    /// Returns the tensor data as a mutable slice.
     ///
-    /// Note that we do allow mutable data access to copies of the Tensor,
-    /// as in the case of low-level deep learning frameworks.
+    /// This method takes `&self` rather than `&mut self` by design: like
+    /// `std::fs::File::write`, the *metadata* of a Tensor (shape, dtype,
+    /// device) is governed by Rust's ownership rules, but writing to the
+    /// underlying data buffer (CPU memory or a GPU pointer) is a side-effect
+    /// outside Rust's aliasing model.  Most C/CUDA kernel APIs accept a
+    /// non-mut Tensor and mutate its data content, so requiring `&mut self`
+    /// here would force artificial mutability annotations throughout the
+    /// deep-learning stack with no real safety benefit.
     ///
-    /// # Arguments
-    /// * `T` - The type of the data
-    ///
-    /// # Returns
-    /// * `Result<&mut [T]>` - The data as a mutable slice
+    /// # Safety contract (caller responsibility)
+    /// If the `Tensor` has been cloned (via `ObjectArc`), the caller must
+    /// ensure no other clone is concurrently reading the data.
+    #[allow(clippy::wrong_self_convention)]
     pub fn data_as_slice_mut<T: AsDLDataType>(&self) -> Result<&mut [T]> {
         let dtype = T::DL_DATA_TYPE;
         if self.dtype() != dtype {

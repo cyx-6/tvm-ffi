@@ -39,31 +39,26 @@ Homepage = "https://github.com/apache/tvm-ffi"
 GitHub = "https://github.com/apache/tvm-ffi"
 
 [project.optional-dependencies]
-# setup tools is needed by torch jit for best perf
-torch = ["torch", "setuptools", "ninja"]
 cpp = ["ninja"]
-# note pytorch does not yet ship with 3.14t
-test = [
-  "pytest",
-  "numpy",
-  "ninja",
-  "torch; python_version < '3.14'",
-  "setuptools",
-]
 
 [dependency-groups]
+torch = [
+  "torch; python_version < '3.14'", # pytorch does not yet ship with 3.14t
+  "setuptools",                     # setuptools is needed by torch jit for best perf
+  "ninja",
+  "numpy",
+  "ml_dtypes",
+]
+test = [{ include-group = "torch" }, "pytest"]
 dev = [
+  { include-group = "test" },
+  "pre-commit",
   "ruff",
-  "mypy",
+  "ty==0.0.15",
   "clang-format",
   "clang-tidy",
   "ipdb",
   "ipython",
-  "ninja",
-  "pre-commit",
-  "pytest",
-  "numpy",
-  "ml_dtypes",
   "cython>=3.0",
   "cmake",
   "scikit-build-core",
@@ -202,6 +197,8 @@ select = [
 ignore = [
   "PLR2004", # pylint: magic-value-comparison
   "ANN401",  # flake8-annotations: any-type
+  "D105",    # pydocstyle: undocumented-magic-method
+  "D107",    # pydocstyle: undocumented-public-init
   "D203",    # pydocstyle: incorrect-blank-line-before-class
   "D213",    # pydocstyle: multi-line-summary-second-line
 ]
@@ -243,7 +240,7 @@ test-skip = ["cp38-*", "cp39-*", "cp310-*", "cp311-*"]
 # focus on testing abi3 wheel
 build-frontend = "build[uv]"
 test-command = "pytest {package}/tests/python -vvs"
-test-extras = ["test"]
+test-groups = ["test"]
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64", "aarch64"]
@@ -255,28 +252,35 @@ environment = { MACOSX_DEPLOYMENT_TARGET = "10.14" }
 [tool.cibuildwheel.windows]
 archs = ["AMD64"]
 
-[tool.mypy]
-python_version = "3.9"
-show_error_codes = true
-mypy_path = ["python", "examples", "tests/python"]
-files = ["python/tvm_ffi", "examples", "tests/python"]
-namespace_packages = true
-explicit_package_bases = true
-allow_redefinition = true
-exclude = '''(?x)(
-  ^\.venv/|
-  ^build/|
-  ^dist/|
-  ^\.mypy_cache/
-)'''
+[tool.ty.environment]
+python-version = "3.9"
+extra-paths = ["python", "examples", "tests/python"]
 
-[[tool.mypy.overrides]]
-module = ["torch", "torch.*", "my_ffi_extension", "my_ffi_extension.*"]
-ignore_missing_imports = true
+[tool.ty.src]
+include = ["python/tvm_ffi/**", "examples/**", "tests/python/**"]
+exclude = [".venv/**", "build/**", "dist/**"]
 
-[[tool.mypy.overrides]]
-module = "_pytest.*"
-follow_imports = "skip"
+[tool.ty.rules]
+unused-ignore-comment = "ignore"
+
+[tool.ty.analysis]
+allowed-unresolved-imports = [
+  "torch",
+  "torch.*",
+  "torch.utils.*",
+  "my_ffi_extension",
+  "my_ffi_extension.*",
+  "_pytest.*",
+  "cupy",
+  "cupy.*",
+  "paddle",
+  "paddle.*",
+  "triton",
+  "triton.*",
+  "cuda.bindings",
+  "cuda.bindings.*",
+  "torch_c_dlpack_ext",
+]
 
 [tool.uv.dependency-groups]
 docs = { requires-python = ">=3.13" }

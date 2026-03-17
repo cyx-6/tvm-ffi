@@ -47,6 +47,8 @@ Table of Contents
    :maxdepth: 1
    :caption: Guides
 
+   guides/export_func_cls.rst
+   guides/dataclass_reflection.rst
    guides/kernel_library_guide.rst
    guides/compiler_integration.md
    guides/cubin_launcher.rst
@@ -60,17 +62,19 @@ Table of Contents
 
    concepts/abi_overview.rst
    concepts/any.rst
+   concepts/containers.rst
    concepts/object_and_class.rst
    concepts/tensor.rst
    concepts/func_module.rst
+   concepts/exception_handling.rst
 
 .. toctree::
    :maxdepth: 1
    :caption: Packaging
 
    packaging/python_packaging.rst
+   packaging/stubgen.rst
    packaging/cpp_tooling.rst
-   packaging/cpp_packaging.md
 
 .. toctree::
    :maxdepth: 1
@@ -84,5 +88,7 @@ Table of Contents
    :maxdepth: 1
    :caption: Developer Manual
 
-   dev/build_from_source.md
+   dev/source_build.rst
+   dev/doc_build.rst
+   dev/ci_cd.rst
    dev/release_process.rst

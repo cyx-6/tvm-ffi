@@ -24,6 +24,8 @@ from enum import IntEnum
 from typing import Any, Callable
 
 # Public module-level variables referenced by Python code
+MISSING: Object
+KWARGS: Object
 ERROR_NAME_TO_TYPE: dict[str, type]
 ERROR_TYPE_TO_NAME: dict[type, str]
 
@@ -32,7 +34,7 @@ _TRACEBACK_TO_BACKTRACE_STR: Callable[[types.TracebackType | None], str] | None
 # DLPack protocol version (defined in tensor.pxi)
 __dlpack_version__: tuple[int, int]
 
-class Object:
+class CObject:
     def __ctypes_handle__(self) -> Any: ...
     def __chandle__(self) -> int: ...
     def __reduce__(self) -> Any: ...
@@ -46,7 +48,11 @@ class Object:
     def __ffi_init__(self, *args: Any) -> None: ...
     def same_as(self, other: Any) -> bool: ...
     def _move(self) -> ObjectRValueRef: ...
-    def __move_handle_from__(self, other: Object) -> None: ...
+    def __move_handle_from__(self, other: CObject) -> None: ...
+
+class Object(CObject): ...
+
+def object_repr(obj: CObject) -> str: ...
 
 class ObjectConvertible:
     def asobject(self) -> Object: ...
@@ -246,6 +252,9 @@ class TypeField:
     metadata: dict[str, Any]
     getter: Any
     setter: Any
+    c_init: bool
+    c_kw_only: bool
+    c_has_default: bool
     dataclass_field: Any | None
 
     def as_property(self, cls: type) -> property: ...
@@ -263,6 +272,7 @@ class TypeInfo:
     type_cls: type | None
     type_index: int
     type_key: str
+    type_ancestors: list[int]
     fields: list[TypeField]
     methods: list[TypeMethod]
     parent_type_info: TypeInfo | None

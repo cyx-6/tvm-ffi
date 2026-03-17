@@ -93,7 +93,8 @@ PREDEFINED             += TVM_FFI_DLL= TVM_FFI_DLL_EXPORT= TVM_FFI_INLINE= \
                           __cplusplus=201703
 EXCLUDE_SYMBOLS        += *details*  *TypeTraits* std \
                          *use_default_type_traits_v* *is_optional_type_v* *operator* \
-EXCLUDE_PATTERNS       += *details.h
+                         tvm::ffi::reflection::default_ tvm::ffi::reflection::default_factory
+EXCLUDE_PATTERNS       += */function_details.h */container_details.h
 ENABLE_PREPROCESSING   = YES
 MACRO_EXPANSION        = YES
 WARNINGS               = YES
@@ -241,6 +242,14 @@ def _copy_rust_docs_to_output(app: sphinx.application.Sphinx, exception: Excepti
         )
 
 
+def _mark_exhale_root_orphan(
+    app: sphinx.application.Sphinx, docname: str, source: list[str]
+) -> None:
+    """Prepend :orphan: to exhale-generated root so it stays out of the sidebar."""
+    if docname == "reference/cpp/generated/index":
+        source[0] = ":orphan:\n\n" + source[0]
+
+
 def setup(app: sphinx.application.Sphinx) -> None:
     """Register custom Sphinx configuration values."""
     _prepare_stub_files()
@@ -248,6 +257,7 @@ def setup(app: sphinx.application.Sphinx) -> None:
     app.add_config_value("build_exhale", build_exhale, "env")
     app.add_config_value("build_rust_docs", build_rust_docs, "env")
     app.connect("config-inited", _apply_config_overrides)
+    app.connect("source-read", _mark_exhale_root_orphan)
     app.connect("build-finished", _copy_rust_docs_to_output)
     app.connect("autodoc-skip-member", _filter_inherited_members)
     app.connect("autodoc-process-docstring", _link_inherited_members)
@@ -283,6 +293,8 @@ def _link_inherited_members(app, what, name, obj, options, lines) -> None:  # no
     if base in _py_native_classes or getattr(base, "__module__", "") == "builtins":
         return
     owner_fq = f"{base.__module__}.{base.__qualname__}".replace("tvm_ffi.core.", "tvm_ffi.")
+    if owner_fq.endswith(".CObject"):
+        owner_fq = owner_fq.removesuffix(".CObject") + ".Object"
     role = "attr" if what in {"attribute", "property"} else "meth"
     lines.clear()
     lines.append(
@@ -329,6 +341,9 @@ _autodoc_always_show = {
     "__ffi_init__",
     "__from_extern_c__",
     "__from_mlir_packed_safe_call__",
+    "_move",
+    "__move_handle_from__",
+    "__init_handle_by_constructor__",
 }
 # If a member method comes from one of these native types, hide it in the docs
 _py_native_classes: tuple[type, ...] = (

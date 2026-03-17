@@ -18,12 +18,16 @@
  */
 #include <gtest/gtest.h>
 #include <tvm/ffi/container/array.h>
+#include <tvm/ffi/container/dict.h>
+#include <tvm/ffi/container/list.h>
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/container/shape.h>
 #include <tvm/ffi/dtype.h>
 #include <tvm/ffi/extra/serialization.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/string.h>
+
+#include <limits>
 
 #include "../testing_object.h"
 
@@ -272,6 +276,77 @@ TEST(Serialization, Maps) {
   EXPECT_TRUE(StructuralEqual()(FromJSONGraph(expected_duplicated), duplicated_map));
 }
 
+TEST(Serialization, Dicts) {
+  // Test empty dict
+  Dict<String, Any> empty_dict;
+  json::Object expected_empty = json::Object{
+      {"root_index", 0},
+      {"nodes", json::Array{json::Object{{"type", "ffi.Dict"}, {"data", json::Array{}}}}}};
+  EXPECT_TRUE(StructuralEqual()(ToJSONGraph(empty_dict), expected_empty));
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(expected_empty), empty_dict));
+
+  // Test single element dict
+  Dict<String, Any> single_dict{{"key", 42}};
+  json::Object expected_single = json::Object{
+      {"root_index", 2},
+      {"nodes", json::Array{json::Object{{"type", "ffi.String"}, {"data", String("key")}},
+                            json::Object{{"type", "int"}, {"data", 42}},
+                            json::Object{{"type", "ffi.Dict"}, {"data", json::Array{0, 1}}}}}};
+  EXPECT_TRUE(StructuralEqual()(ToJSONGraph(single_dict), expected_single));
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(expected_single), single_dict));
+
+  // Test duplicated element dict
+  Dict<String, Any> duplicated_dict{{"b", 42}, {"a", 42}};
+  json::Object expected_duplicated = json::Object{
+      {"root_index", 3},
+      {"nodes", json::Array{
+                    json::Object{{"type", "ffi.String"}, {"data", "b"}},
+                    json::Object{{"type", "int"}, {"data", 42}},
+                    json::Object{{"type", "ffi.String"}, {"data", "a"}},
+                    json::Object{{"type", "ffi.Dict"}, {"data", json::Array{0, 1, 2, 1}}},
+                }}};
+  EXPECT_TRUE(StructuralEqual()(ToJSONGraph(duplicated_dict), expected_duplicated));
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(expected_duplicated), duplicated_dict));
+}
+
+TEST(Serialization, DictWithIntKeys) {
+  Dict<Any, Any> dict;
+  dict.Set(static_cast<int64_t>(1), String("one"));
+  dict.Set(static_cast<int64_t>(2), String("two"));
+
+  json::Value serialized = ToJSONGraph(dict);
+  Any deserialized = FromJSONGraph(serialized);
+  Dict<Any, Any> result = deserialized.cast<Dict<Any, Any>>();
+  EXPECT_EQ(result.size(), 2);
+  EXPECT_EQ(std::string(result[1].cast<String>()), "one");
+  EXPECT_EQ(std::string(result[2].cast<String>()), "two");
+}
+
+TEST(Serialization, DictWithArrayValues) {
+  Array<Any> arr;
+  arr.push_back(10);
+  arr.push_back(20);
+  Dict<String, Any> dict{{"nums", arr}};
+
+  json::Value serialized = ToJSONGraph(dict);
+  Any deserialized = FromJSONGraph(serialized);
+  Dict<String, Any> result = deserialized.cast<Dict<String, Any>>();
+  Array<Any> result_arr = result["nums"].cast<Array<Any>>();
+  EXPECT_EQ(result_arr.size(), 2);
+  EXPECT_EQ(result_arr[0].cast<int64_t>(), 10);
+  EXPECT_EQ(result_arr[1].cast<int64_t>(), 20);
+}
+
+TEST(Serialization, DictOfObjects) {
+  TVar x("x");
+  Dict<String, Any> dict{{"var", x}};
+
+  json::Value serialized = ToJSONGraph(dict);
+  Any deserialized = FromJSONGraph(serialized);
+  Dict<String, Any> result = deserialized.cast<Dict<String, Any>>();
+  EXPECT_EQ(std::string(result["var"].cast<TVar>()->name), "x");
+}
+
 TEST(Serialization, Shapes) {
   Shape empty_shape;
 
@@ -354,6 +429,46 @@ TEST(Serialization, AttachMetadata) {
   EXPECT_TRUE(StructuralEqual()(FromJSONGraph(expected), value));
 }
 
+TEST(Serialization, ListBasic) {
+  // Test empty list
+  List<Any> empty_list;
+  json::Object expected_empty = json::Object{
+      {"root_index", 0},
+      {"nodes", json::Array{json::Object{{"type", "ffi.List"}, {"data", json::Array{}}}}}};
+  EXPECT_TRUE(StructuralEqual()(ToJSONGraph(empty_list), expected_empty));
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(expected_empty), empty_list));
+
+  // Test single element list
+  List<Any> single_list;
+  single_list.push_back(Any(42));
+  json::Object expected_single =
+      json::Object{{"root_index", 1},
+                   {"nodes", json::Array{
+                                 json::Object{{"type", "int"}, {"data", static_cast<int64_t>(42)}},
+                                 json::Object{{"type", "ffi.List"}, {"data", json::Array{0}}},
+                             }}};
+  EXPECT_TRUE(StructuralEqual()(ToJSONGraph(single_list), expected_single));
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(expected_single), single_list));
+}
+
+TEST(Serialization, ListRoundTrip) {
+  // Test roundtrip for nested list
+  List<Any> nested;
+  nested.push_back(1);
+  nested.push_back(String("hello"));
+  nested.push_back(true);
+  json::Value serialized = ToJSONGraph(nested);
+  Any deserialized = FromJSONGraph(serialized);
+  EXPECT_TRUE(StructuralEqual()(deserialized, nested));
+}
+
+TEST(Serialization, DISABLED_ListCycleDetection) {
+  List<Any> lst;
+  lst.push_back(42);
+  lst.push_back(lst);  // creates a cycle via shared mutable reference
+  EXPECT_ANY_THROW(ToJSONGraph(lst));
+}
+
 TEST(Serialization, ShuffleNodeOrder) {
   // the FromJSONGraph is agnostic to the node order
   // so we can shuffle the node order as it reads nodes lazily
@@ -367,6 +482,368 @@ TEST(Serialization, ShuffleNodeOrder) {
                     json::Object{{"type", "int"}, {"data", 42}},
                 }}};
   EXPECT_TRUE(StructuralEqual()(FromJSONGraph(expected_shuffled), duplicated_map));
+}
+
+// ---------------------------------------------------------------------------
+// Integer edge cases
+// ---------------------------------------------------------------------------
+TEST(Serialization, IntegerEdgeCases) {
+  // zero
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(static_cast<int64_t>(0))),
+                                static_cast<int64_t>(0)));
+  // negative
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(static_cast<int64_t>(-1))),
+                                static_cast<int64_t>(-1)));
+  // large positive
+  int64_t large = 1000000000000LL;
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(large)), large));
+  // large negative
+  int64_t large_neg = -999999999999LL;
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(large_neg)), large_neg));
+  // INT64_MIN and INT64_MAX
+  int64_t imin = std::numeric_limits<int64_t>::min();
+  int64_t imax = std::numeric_limits<int64_t>::max();
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(imin)), imin));
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(imax)), imax));
+}
+
+// ---------------------------------------------------------------------------
+// Float edge cases
+// ---------------------------------------------------------------------------
+TEST(Serialization, FloatEdgeCases) {
+  // zero
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(0.0)), 0.0));
+  // negative
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(-1.5)), -1.5));
+  // very large
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(1e300)), 1e300));
+  // very small
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(1e-300)), 1e-300));
+}
+
+// ---------------------------------------------------------------------------
+// String edge cases
+// ---------------------------------------------------------------------------
+TEST(Serialization, EmptyString) {
+  String empty("");
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(empty)), empty));
+}
+
+TEST(Serialization, UnicodeString) {
+  String unicode("hello 世界 🌍");
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(unicode)), unicode));
+}
+
+TEST(Serialization, NullCharInString) {
+  // String with embedded null characters
+  std::string with_null("ab\0cd", 5);
+  String s(with_null);
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(s)), s));
+}
+
+// ---------------------------------------------------------------------------
+// Object with all POD field types (exercises node-graph path for POD fields)
+// ---------------------------------------------------------------------------
+TEST(Serialization, AllFieldsObject) {
+  DLDataType dtype;
+  dtype.code = kDLFloat;
+  dtype.bits = 32;
+  dtype.lanes = 1;
+
+  DLDevice device;
+  device.device_type = kDLCUDA;
+  device.device_id = 3;
+
+  Array<Any> arr;
+  arr.push_back(1);
+  arr.push_back(String("two"));
+
+  Map<String, Any> map{{"k", 99}};
+
+  TAllFields obj(true, -7, 2.5, dtype, device, String("hello"), String("opt"), arr, map);
+  json::Value serialized = ToJSONGraph(obj);
+  Any deserialized = FromJSONGraph(serialized);
+
+  // verify each field
+  TAllFields result = deserialized.cast<TAllFields>();
+  EXPECT_EQ(result->v_bool, true);
+  EXPECT_EQ(result->v_int, -7);
+  EXPECT_DOUBLE_EQ(result->v_float, 2.5);
+  EXPECT_EQ(result->v_dtype.code, kDLFloat);
+  EXPECT_EQ(result->v_dtype.bits, 32);
+  EXPECT_EQ(result->v_dtype.lanes, 1);
+  EXPECT_EQ(result->v_device.device_type, kDLCUDA);
+  EXPECT_EQ(result->v_device.device_id, 3);
+  EXPECT_EQ(std::string(result->v_str), "hello");
+  EXPECT_TRUE(result->v_opt_str.has_value());
+  EXPECT_EQ(std::string(result->v_opt_str.value()), "opt");
+  EXPECT_EQ(result->v_array.size(), 2);
+  EXPECT_EQ(result->v_map.size(), 1);
+}
+
+TEST(Serialization, AllFieldsObjectOptionalNone) {
+  DLDataType dtype;
+  dtype.code = kDLInt;
+  dtype.bits = 64;
+  dtype.lanes = 1;
+
+  DLDevice device;
+  device.device_type = kDLCPU;
+  device.device_id = 0;
+
+  TAllFields obj(false, 0, 0.0, dtype, device, String(""), std::nullopt, Array<Any>(),
+                 Map<String, Any>());
+  json::Value serialized = ToJSONGraph(obj);
+  Any deserialized = FromJSONGraph(serialized);
+
+  TAllFields result = deserialized.cast<TAllFields>();
+  EXPECT_EQ(result->v_bool, false);
+  EXPECT_EQ(result->v_int, 0);
+  EXPECT_DOUBLE_EQ(result->v_float, 0.0);
+  EXPECT_EQ(std::string(result->v_str), "");
+  EXPECT_FALSE(result->v_opt_str.has_value());
+  EXPECT_EQ(result->v_array.size(), 0);
+  EXPECT_EQ(result->v_map.size(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Default field values during deserialization
+// ---------------------------------------------------------------------------
+TEST(Serialization, DefaultFieldValues) {
+  // serialize a TWithDefaults, then deserialize from JSON with missing default fields
+  TWithDefaults original(100, 42, "default", true);
+  json::Value serialized = ToJSONGraph(original);
+  // roundtrip should work
+  Any deserialized = FromJSONGraph(serialized);
+  TWithDefaults result = deserialized.cast<TWithDefaults>();
+  EXPECT_EQ(result->required_val, 100);
+  EXPECT_EQ(result->default_int, 42);
+  EXPECT_EQ(std::string(result->default_str), "default");
+  EXPECT_EQ(result->default_bool, true);
+}
+
+TEST(Serialization, DefaultFieldValuesMissing) {
+  // manually construct JSON with only required field, defaults should kick in
+  // required_val is int64_t so it is inlined directly (POD field)
+  json::Object data;
+  data.Set("required_val", static_cast<int64_t>(999));
+
+  json::Object graph{
+      {"root_index", 0},
+      {"nodes", json::Array{json::Object{{"type", "test.WithDefaults"}, {"data", data}}}}};
+  Any result = FromJSONGraph(graph);
+  TWithDefaults obj = result.cast<TWithDefaults>();
+  EXPECT_EQ(obj->required_val, 999);
+  EXPECT_EQ(obj->default_int, 42);
+  EXPECT_EQ(std::string(obj->default_str), "default");
+  EXPECT_EQ(obj->default_bool, true);
+}
+
+// ---------------------------------------------------------------------------
+// Shared object references
+// ---------------------------------------------------------------------------
+TEST(Serialization, SharedObjectReferences) {
+  TVar shared_var("shared");
+  // two funcs share the same var
+  TFunc f1({shared_var}, {shared_var, shared_var}, std::nullopt);
+
+  json::Value serialized = ToJSONGraph(f1);
+  Any deserialized = FromJSONGraph(serialized);
+  TFunc result = deserialized.cast<TFunc>();
+
+  // all references to "shared" should be the same object after deserialization
+  // via the node dedup mechanism
+  EXPECT_EQ(result->params.size(), 1);
+  EXPECT_EQ(result->body.size(), 2);
+  // the params[0] and body[0] and body[1] should all refer to the same object
+  EXPECT_EQ(result->params[0].get(), result->body[0].get());
+  EXPECT_EQ(result->body[0].get(), result->body[1].get());
+}
+
+// ---------------------------------------------------------------------------
+// Nested objects
+// ---------------------------------------------------------------------------
+TEST(Serialization, NestedObjects) {
+  TVar x("x");
+  TVar y("y");
+  TFunc inner({x}, {x}, String("inner"));
+  // put the inner func as a body element of the outer func
+  TFunc outer({y}, {inner}, String("outer"));
+
+  json::Value serialized = ToJSONGraph(outer);
+  Any deserialized = FromJSONGraph(serialized);
+  TFunc result = deserialized.cast<TFunc>();
+
+  EXPECT_EQ(result->comment.value(), "outer");
+  TFunc inner_result = Any(result->body[0]).cast<TFunc>();
+  EXPECT_EQ(inner_result->comment.value(), "inner");
+  EXPECT_EQ(std::string(Any(inner_result->params[0]).cast<TVar>()->name), "x");
+}
+
+// ---------------------------------------------------------------------------
+// Map with integer keys
+// ---------------------------------------------------------------------------
+TEST(Serialization, MapWithIntKeys) {
+  Map<Any, Any> map;
+  map.Set(static_cast<int64_t>(1), String("one"));
+  map.Set(static_cast<int64_t>(2), String("two"));
+
+  json::Value serialized = ToJSONGraph(map);
+  Any deserialized = FromJSONGraph(serialized);
+  Map<Any, Any> result = deserialized.cast<Map<Any, Any>>();
+  EXPECT_EQ(result.size(), 2);
+  EXPECT_EQ(std::string(result[1].cast<String>()), "one");
+  EXPECT_EQ(std::string(result[2].cast<String>()), "two");
+}
+
+// ---------------------------------------------------------------------------
+// Nested containers
+// ---------------------------------------------------------------------------
+TEST(Serialization, NestedArrays) {
+  Array<Any> inner1;
+  inner1.push_back(1);
+  inner1.push_back(2);
+  Array<Any> inner2;
+  inner2.push_back(3);
+  Array<Any> outer;
+  outer.push_back(inner1);
+  outer.push_back(inner2);
+
+  json::Value serialized = ToJSONGraph(outer);
+  Any deserialized = FromJSONGraph(serialized);
+  Array<Any> result = deserialized.cast<Array<Any>>();
+  EXPECT_EQ(result.size(), 2);
+  Array<Any> r1 = result[0].cast<Array<Any>>();
+  Array<Any> r2 = result[1].cast<Array<Any>>();
+  EXPECT_EQ(r1.size(), 2);
+  EXPECT_EQ(r1[0].cast<int64_t>(), 1);
+  EXPECT_EQ(r1[1].cast<int64_t>(), 2);
+  EXPECT_EQ(r2.size(), 1);
+  EXPECT_EQ(r2[0].cast<int64_t>(), 3);
+}
+
+TEST(Serialization, MapWithArrayValues) {
+  Array<Any> arr;
+  arr.push_back(10);
+  arr.push_back(20);
+  Map<String, Any> map{{"nums", arr}};
+
+  json::Value serialized = ToJSONGraph(map);
+  Any deserialized = FromJSONGraph(serialized);
+  Map<String, Any> result = deserialized.cast<Map<String, Any>>();
+  Array<Any> result_arr = result["nums"].cast<Array<Any>>();
+  EXPECT_EQ(result_arr.size(), 2);
+  EXPECT_EQ(result_arr[0].cast<int64_t>(), 10);
+  EXPECT_EQ(result_arr[1].cast<int64_t>(), 20);
+}
+
+// ---------------------------------------------------------------------------
+// Array and Map with objects
+// ---------------------------------------------------------------------------
+TEST(Serialization, ArrayOfObjects) {
+  TVar x("x");
+  TVar y("y");
+  Array<Any> arr;
+  arr.push_back(x);
+  arr.push_back(y);
+
+  json::Value serialized = ToJSONGraph(arr);
+  Any deserialized = FromJSONGraph(serialized);
+  Array<Any> result = deserialized.cast<Array<Any>>();
+  EXPECT_EQ(result.size(), 2);
+  EXPECT_EQ(std::string(result[0].cast<TVar>()->name), "x");
+  EXPECT_EQ(std::string(result[1].cast<TVar>()->name), "y");
+}
+
+TEST(Serialization, MapOfObjects) {
+  TVar x("x");
+  Map<String, Any> map{{"var", x}};
+
+  json::Value serialized = ToJSONGraph(map);
+  Any deserialized = FromJSONGraph(serialized);
+  Map<String, Any> result = deserialized.cast<Map<String, Any>>();
+  EXPECT_EQ(std::string(result["var"].cast<TVar>()->name), "x");
+}
+
+// ---------------------------------------------------------------------------
+// Mixed-type array (exercises runtime type dispatch for each element)
+// ---------------------------------------------------------------------------
+TEST(Serialization, MixedTypeArrayRoundTrip) {
+  DLDataType dtype;
+  dtype.code = kDLInt;
+  dtype.bits = 32;
+  dtype.lanes = 1;
+
+  DLDevice device;
+  device.device_type = kDLCPU;
+  device.device_id = 0;
+
+  Array<Any> arr;
+  arr.push_back(nullptr);
+  arr.push_back(true);
+  arr.push_back(false);
+  arr.push_back(static_cast<int64_t>(42));
+  arr.push_back(3.14);
+  arr.push_back(String("hello"));
+  arr.push_back(dtype);
+  arr.push_back(device);
+
+  // roundtrip and verify structural equality
+  EXPECT_TRUE(StructuralEqual()(FromJSONGraph(ToJSONGraph(arr)), arr));
+}
+
+// ---------------------------------------------------------------------------
+// Error cases
+// ---------------------------------------------------------------------------
+TEST(Serialization, ErrorMissingRequiredField) {
+  // required_val is required but not provided
+  json::Object data;
+  json::Object graph{
+      {"root_index", 0},
+      {"nodes", json::Array{json::Object{{"type", "test.WithDefaults"}, {"data", data}}}}};
+  EXPECT_ANY_THROW(FromJSONGraph(graph));
+}
+
+TEST(Serialization, ErrorInvalidRootStructure) {
+  // not an object
+  EXPECT_ANY_THROW(FromJSONGraph(json::Value(42)));
+}
+
+TEST(Serialization, ErrorMissingRootIndex) {
+  json::Object graph{{"nodes", json::Array{json::Object{{"type", "None"}}}}};
+  EXPECT_ANY_THROW(FromJSONGraph(graph));
+}
+
+TEST(Serialization, ErrorMissingNodes) {
+  json::Object graph{{"root_index", 0}};
+  EXPECT_ANY_THROW(FromJSONGraph(graph));
+}
+
+// ---------------------------------------------------------------------------
+// String serialization roundtrip (json::Stringify / json::Parse)
+// ---------------------------------------------------------------------------
+TEST(Serialization, StringRoundTrip) {
+  TVar x("x");
+  TFunc f({x}, {x}, String("comment"));
+  String json_str = json::Stringify(ToJSONGraph(f));
+  Any deserialized = FromJSONGraph(json::Parse(json_str));
+  EXPECT_TRUE(StructuralEqual::Equal(deserialized, f, /*map_free_vars=*/true));
+}
+
+TEST(Serialization, StringRoundTripPrimitives) {
+  auto rt = [](const Any& v) {
+    return FromJSONGraph(json::Parse(json::Stringify(ToJSONGraph(v))));
+  };
+  // int
+  EXPECT_TRUE(StructuralEqual()(rt(static_cast<int64_t>(123)), 123));
+  // bool
+  EXPECT_TRUE(StructuralEqual()(rt(true), true));
+  // float
+  EXPECT_TRUE(StructuralEqual()(rt(2.718), 2.718));
+  // string
+  EXPECT_TRUE(StructuralEqual()(rt(String("test")), String("test")));
+  // null
+  EXPECT_TRUE(StructuralEqual()(rt(nullptr), nullptr));
 }
 
 }  // namespace

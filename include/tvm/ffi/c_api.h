@@ -62,7 +62,7 @@
 /*! \brief TVM FFI minor version. */
 #define TVM_FFI_VERSION_MINOR 1
 /*! \brief TVM FFI patch version. */
-#define TVM_FFI_VERSION_PATCH 9
+#define TVM_FFI_VERSION_PATCH 10
 // NOLINTEND(modernize-macro-to-enum)
 
 #ifdef __cplusplus
@@ -173,6 +173,10 @@ typedef enum {
    * \sa TVMFFIObjectCreateOpaque
    */
   kTVMFFIOpaquePyObject = 74,
+  /*! \brief List object. */
+  kTVMFFIList = 75,
+  /*! \brief Dict object. */
+  kTVMFFIDict = 76,
   //----------------------------------------------------------------
   // more complex objects
   //----------------------------------------------------------------
@@ -346,6 +350,7 @@ typedef struct {
   /*! \brief The size of the data. */
   size_t size;
 } TVMFFIByteArray;
+// [TVMFFIByteArray.end]
 
 /*!
  * \brief Shape cell used in shape object following header.
@@ -356,7 +361,41 @@ typedef struct {
   /*! \brief The size of the data. */
   size_t size;
 } TVMFFIShapeCell;
-// [TVMFFIByteArray.end]
+
+// [TVMFFISeqCell.begin]
+/*!
+ * \brief Sequence cell used by sequence-like containers.
+ *
+ * ArrayObj and ListObj both inherit from this cell.
+ */
+#ifdef __cplusplus
+struct TVMFFISeqCell {
+#else
+typedef struct {
+#endif
+  /*! \brief Data pointer to the first element of the sequence. */
+  void* data;
+  /*! \brief Number of elements used. */
+  int64_t size;
+  /*! \brief Number of elements allocated. */
+  int64_t capacity;
+  /*!
+   * \brief Optional deleter for the data buffer.
+   *
+   *  When non-null, data was allocated separately from the object
+   *  (e.g. ListObj heap buffer) and data_deleter is called to free it.
+   *
+   *  When nullptr, data lives inside the object allocation itself
+   *  (e.g. ArrayObj inplace storage via make_inplace_array_object)
+   *  and is freed together with the object.
+   */
+  void (*data_deleter)(void*);
+#ifdef __cplusplus
+};
+#else
+} TVMFFISeqCell;
+#endif
+// [TVMFFISeqCell.end]
 
 /*!
  * \brief Mode to update the backtrace of the error.
@@ -436,7 +475,6 @@ typedef struct {
  *  Possible return error of the API functions:
  *  * 0: success
  *  * -1: error happens, can be retrieved by TVMFFIErrorMoveFromRaised
- *  * -2: a frontend error occurred and recorded in the frontend.
  *
  * \note We decided to leverage TVMFFIErrorMoveFromRaised and TVMFFIErrorSetRaised
  *  for C function error propagation. This design choice, while
@@ -825,6 +863,65 @@ typedef enum {
    * This is an optional meta-data for structural eq/hash.
    */
   kTVMFFIFieldFlagBitMaskSEqHashDef = 1 << 4,
+  /*!
+   * \brief The default_value_or_factory is a callable factory function () -> Any.
+   *
+   * When this flag is set along with kTVMFFIFieldFlagBitMaskHasDefault,
+   * the default_value_or_factory field contains a Function that should be
+   * called with no arguments to produce the default value, rather than
+   * being used directly as the default value.
+   */
+  kTVMFFIFieldFlagBitMaskDefaultFromFactory = 1 << 5,
+  /*!
+   * \brief The field is excluded from repr output.
+   *
+   * When set, the field will not appear in the generic reflection-based repr.
+   * By default this flag is off (meaning the field is included in repr).
+   */
+  kTVMFFIFieldFlagBitMaskReprOff = 1 << 6,
+  /*!
+   * \brief The field is excluded from recursive comparison.
+   *
+   * When set, the field will not participate in generic reflection-based
+   * recursive comparison (RecursiveEq, RecursiveLt, etc.).
+   * By default this flag is off (meaning the field is included in comparison).
+   */
+  kTVMFFIFieldFlagBitMaskCompareOff = 1 << 7,
+  /*!
+   * \brief The field is excluded from recursive hashing.
+   *
+   * When set, the field will not participate in generic reflection-based
+   * recursive hashing (RecursiveHash).
+   * By default this flag is off (meaning the field is included in hashing).
+   */
+  kTVMFFIFieldFlagBitMaskHashOff = 1 << 8,
+  /*!
+   * \brief The field is excluded from auto-generated ``__ffi_init__``.
+   *
+   * When set, the field will not appear as a parameter of the reflection-based
+   * auto-generated constructor.  The field must either have a default value
+   * or be initialized by the creator (default constructor / UnsafeInit).
+   * By default this flag is off (meaning the field is included in init).
+   */
+  kTVMFFIFieldFlagBitMaskInitOff = 1 << 9,
+  /*!
+   * \brief The field is keyword-only in the auto-generated ``__ffi_init__``.
+   *
+   * When set, the field can only be provided via the KWARGS calling convention
+   * (not as a positional argument) in the auto-generated constructor.
+   * This flag is only meaningful when kTVMFFIFieldFlagBitMaskInitOff is *not* set.
+   * By default this flag is off (meaning the field accepts positional arguments).
+   */
+  kTVMFFIFieldFlagBitMaskKwOnly = 1 << 10,
+  /*!
+   * \brief The setter field is a TVMFFIObjectHandle pointing to a FunctionObj.
+   *
+   * When this flag is set, the ``setter`` member of TVMFFIFieldInfo is not a
+   * TVMFFIFieldSetter function pointer but instead a TVMFFIObjectHandle
+   * pointing to a FunctionObj.  The FunctionObj is called with two arguments:
+   * ``(field_addr_as_OpaquePtr, value_as_AnyView)``.
+   */
+  kTVMFFIFieldFlagBitSetterIsFunctionObj = 1 << 11,
 #ifdef __cplusplus
 };
 #else
@@ -920,32 +1017,48 @@ typedef struct {
   TVMFFIFieldGetter getter;
   /*!
    * \brief The setter to access the field.
+   *
+   * When kTVMFFIFieldFlagBitSetterIsFunctionObj is NOT set (default),
+   * this is a TVMFFIFieldSetter function pointer (cast to void*).
+   * When kTVMFFIFieldFlagBitSetterIsFunctionObj IS set,
+   * this is a TVMFFIObjectHandle pointing to a FunctionObj.
+   *
    * \note The setter is set even if the field is readonly for serialization.
    */
-  TVMFFIFieldSetter setter;
+  void* setter;
   /*!
-   * \brief The default value of the field, this field hold AnyView,
-   *        valid when flags set kTVMFFIFieldFlagBitMaskHasDefault
+   * \brief The default value or default factory of the field.
+   *
+   * When flags has kTVMFFIFieldFlagBitMaskHasDefault set:
+   * - If kTVMFFIFieldFlagBitMaskDefaultFromFactory is NOT set,
+   *   this holds the static default value as AnyView.
+   * - If kTVMFFIFieldFlagBitMaskDefaultFromFactory IS set,
+   *   this holds a Function (() -> Any) that produces the default.
    */
-  TVMFFIAny default_value;
+  TVMFFIAny default_value_or_factory;
   /*!
-   * \brief Records the static type kind of the field.
+   * \brief The compile-time static type index of the field.
    *
-   * Possible values:
+   * This reflects the type declared at compile time, which is only trustworthy
+   * for statically-inferrable types. It does NOT necessarily match the runtime
+   * type. For example, a field declared as `Any` will have
+   * `field_static_type_index == kTVMFFIAny` even if it holds an `int` at runtime,
+   * and `Array<Any>` will report `kTVMFFIArray` even though the elements may be
+   * `Array<int>` at runtime.
    *
-   * - TVMFFITypeIndex::kTVMFFIObject for general objects.
-   *   The value is nullable when kTVMFFIObject is chosen.
-   * - Static object type kinds such as Map, Dict, String
-   * - POD type index, note it does not give information about storage size of the field.
-   * - TVMFFITypeIndex::kTVMFFIAny if we don't have specialized info
-   *   about the field.
+   * \warning Do NOT use this field to determine the actual type of a value at
+   * runtime. It is purely a compile-time hint derived from the C++ field
+   * declaration. The actual runtime type must be obtained from the value's
+   * own `type_index`.
    *
-   * When the value is a type index of Object type, the field is storaged as an ObjectRef.
+   * \warning When the static type is a generic container (e.g. `Array<Any>`),
+   * this field only tells you it is an Array — it says nothing about the
+   * element types actually stored inside. Similarly, `kTVMFFIObject` only
+   * means "some ObjectRef" without any subtype information.
    *
-   * \note This information maybe helpful in designing serializer.
-   * As it helps to narrow down the field type so we don't have to
-   * print type_key for cases like POD types.
-   * It also helps to provide opportunities to enable short-cut getter to ObjectRef fields.
+   * \note This is used by the serializer to inline POD field values directly
+   * (avoiding node-graph overhead for None, Bool, Int, Float, DataType),
+   * while routing other types through the node graph.
    */
   int32_t field_static_type_index;
 } TVMFFIFieldInfo;
@@ -1006,20 +1119,42 @@ typedef struct {
 } TVMFFITypeMetadata;
 
 /*!
- * \brief Column array that stores extra attributes about types
+ * \brief One column of a type–attribute table: extra attributes keyed by runtime type index.
  *
- * The attributes stored in a column array that can be looked up by type index.
- * Note that the TypeAttr behaves like type_traits so column[T] so not contain
- * attributes from base classes.
+ * TypeAttr is designed to support an open set of possible attributes that can be
+ * registered and queried across different downstream use cases.
  *
- * \note
+ * Conceptually, TypeAttr is a dynamic variant of TypeTraits as seen in C++/Rust.
+ * It behaves like c++ type_traits, so column[T] does not contain attributes from base classes.
+ *
+ * Typical use cases for TypeAttr include:
+ * - Storing extra magic trait functions that can customize behaviors like hash/eq/repr.
+ * - Storing extra metadata about type data structures (e.g., mutability) and properties of
+ *   op/operator structures that can be used by compiler transformations (e.g., passes).
+ *
+ * This column covers type indices in the range [begin_index, begin_index + size).
+ * For a given type_index, the corresponding entry is data[type_index - begin_index]
+ * when begin_index <= type_index < begin_index + size; otherwise the entry is
+ * not present (treat as None/null).
+ *
  * \sa TVMFFIRegisterTypeAttr
  */
 typedef struct {
-  /*! \brief The data of the column. */
+  /*! \brief The data of the column, indexed by (type_index - begin_index). */
   const TVMFFIAny* data;
-  /*! \brief The size of the column. */
-  size_t size;
+  /*!
+   * \brief The number of elements in the data array.
+   *
+   * The column covers type indices in the range [begin_index, begin_index + size).
+   * For a given type_index, the corresponding entry is data[type_index - begin_index]
+   * when begin_index <= type_index < begin_index + size.
+   */
+  int32_t size;
+  /*!
+   * \brief The starting type index of the column data.
+   * A value of 0 means the data array starts at type_index 0.
+   */
+  int32_t begin_index;
 } TVMFFITypeAttrColumn;
 
 /*!

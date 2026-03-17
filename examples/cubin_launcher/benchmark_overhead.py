@@ -39,8 +39,8 @@ import traceback
 from typing import Callable
 
 import torch
-import triton  # type: ignore[import-not-found]
-import triton.language as tl  # type: ignore[import-not-found]
+import triton
+import triton.language as tl
 from tvm_ffi import cpp
 from tvm_ffi.module import Module
 
@@ -63,7 +63,7 @@ def get_cpu_name() -> str:
 
 # Define empty kernel at global scope
 @triton.jit
-def empty_kernel(A_ptr, B_ptr, C_ptr, n, BLOCK: tl.constexpr = 128):  # noqa
+def empty_kernel(A_ptr, B_ptr, C_ptr, n, BLOCK: tl.constexpr = 128):  # noqa  # ty: ignore[invalid-parameter-default]
     """Empty kernel that does nothing - for measuring pure launch overhead."""
     pass
 
@@ -132,13 +132,7 @@ def generate_cubin() -> bytes:
     a_dummy = torch.empty(n, dtype=torch.float32, device="cuda")
     b_dummy = torch.empty(n, dtype=torch.float32, device="cuda")
     c_dummy = torch.empty(n, dtype=torch.float32, device="cuda")
-    empty_kernel[1,](a_dummy, b_dummy, c_dummy, n)
-
-    # Extract compiled CUBIN from the device cache
-    device_caches = empty_kernel.device_caches
-    device_id = next(iter(device_caches.keys()))
-    cache_tuple = device_caches[device_id]
-    compiled_kernel = next(iter(cache_tuple[0].values()))
+    compiled_kernel = empty_kernel[1,](a_dummy, b_dummy, c_dummy, n)
 
     # Get CUBIN bytes
     cubin_bytes = compiled_kernel.kernel

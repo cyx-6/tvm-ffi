@@ -283,13 +283,21 @@ pub struct TVMFFIFieldInfo {
     pub offset: i64,
     /// The getter to access the field
     pub getter: Option<TVMFFIFieldGetter>,
-    /// The setter to access the field
-    /// The setter is set even if the field is readonly for serialization
-    pub setter: Option<TVMFFIFieldSetter>,
-    /// The default value of the field, this field hold AnyView,
-    /// valid when flags set kTVMFFIFieldFlagBitMaskHasDefault
-    pub default_value: TVMFFIAny,
-    /// Records the static type kind of the field
+    /// The setter to access the field.
+    ///
+    /// When kTVMFFIFieldFlagBitSetterIsFunctionObj is NOT set (default),
+    /// this is a TVMFFIFieldSetter function pointer cast to *mut c_void.
+    /// When kTVMFFIFieldFlagBitSetterIsFunctionObj IS set,
+    /// this is a TVMFFIObjectHandle pointing to a FunctionObj.
+    ///
+    /// The setter is set even if the field is readonly for serialization.
+    pub setter: *mut c_void,
+    /// The default value or factory of the field, this field holds AnyView.
+    /// Valid when flags set kTVMFFIFieldFlagBitMaskHasDefault.
+    /// When kTVMFFIFieldFlagBitMaskDefaultFromFactory is also set,
+    /// this is a callable factory function () -> Any.
+    pub default_value_or_factory: TVMFFIAny,
+    /// Records the compile-time static type kind of the field.
     pub field_static_type_index: i32,
 }
 
@@ -337,10 +345,15 @@ pub struct TVMFFITypeMetadata {
 /// attributes from base classes.
 #[repr(C)]
 pub struct TVMFFITypeAttrColumn {
-    /// The data of the column
+    /// The data of the column, indexed by (type_index - begin_index).
     pub data: *const TVMFFIAny,
-    /// The size of the column
-    pub size: usize,
+    /// The number of elements in the data array.
+    /// The column covers type indices [begin_index, begin_index + size).
+    pub size: i32,
+    /// The starting type index of the column data.
+    /// Lookup: if begin_index <= type_index < begin_index + size,
+    /// the entry is data[(type_index - begin_index) as usize].
+    pub begin_index: i32,
 }
 
 /// Runtime type information for object type checking
