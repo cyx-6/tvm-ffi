@@ -89,13 +89,20 @@ jobs:
             cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=C:/opt/llvm/Library/bin/clang.exe -DCMAKE_CXX_COMPILER=C:/opt/llvm/Library/bin/clang++.exe -DPython_EXECUTABLE=%PYTHON% &&
             cmake --build build &&
             cmake --install build &&
+            popd &&
+            pushd {project}\addons\tvm-ffi-orcjit\examples\quick-start &&
+            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=C:/opt/llvm/Library/bin/clang.exe -DCMAKE_CXX_COMPILER=C:/opt/llvm/Library/bin/clang++.exe -DPython_EXECUTABLE=%PYTHON% &&
+            cmake --build build &&
             popd
           CIBW_TEST_COMMAND: >-
             pytest {project}/addons/tvm-ffi-orcjit/tests -v &&
             (cd {project}/addons/tvm-ffi-orcjit/examples/quick-start &&
-            python run.py)
+            python run.py --lang cpp &&
+            python run.py --lang c)
           CIBW_TEST_COMMAND_WINDOWS: >-
-            pytest {project}\addons\tvm-ffi-orcjit\tests -v
+            pytest {project}\addons\tvm-ffi-orcjit\tests -v &&
+            cd {project}\addons\tvm-ffi-orcjit\examples\quick-start &&
+            python run.py --lang c
 
       - uses: actions/upload-artifact@v4
         with:

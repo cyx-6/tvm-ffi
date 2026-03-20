@@ -557,5 +557,4 @@ def test_ctor_dtor() -> None:
 
 
 if __name__ == "__main__":
-    # pytest.main([__file__, "-v"])
     test_ctor_dtor()

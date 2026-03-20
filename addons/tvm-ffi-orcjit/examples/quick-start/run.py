@@ -16,16 +16,21 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Quick Start Example - Load and call functions from add.o.
+"""Quick Start Example - Load and call functions from compiled object files.
 
 This script demonstrates how to:
 1. Create an ExecutionSession instance
 2. Create a DynamicLibrary
-3. Load a compiled object file
+3. Load a compiled object file (C++ or pure C)
 4. Get functions by name
 5. Call them like regular Python functions
+
+Usage:
+    python run.py          # Load C++ object file (add.o)
+    python run.py --lang c # Load pure C object file (add_c.o)
 """
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -39,21 +44,35 @@ except ImportError:
 
 def main() -> int:
     """Run the quick start example."""
-    # Check if object file exists
-    obj_file = Path("add.o")
+    parser = argparse.ArgumentParser(description="Quick Start Example")
+    parser.add_argument(
+        "--lang",
+        choices=["cpp", "c"],
+        default="cpp",
+        help="Language variant to load: 'cpp' for add.o (default), 'c' for add_c.o",
+    )
+    args = parser.parse_args()
+
+    # Select object file based on language choice
+    if args.lang == "c":
+        obj_file = Path("add_c.o")
+    else:
+        obj_file = Path("add.o")
+
     if not obj_file.exists():
         print(f"Error: {obj_file} not found!")
-        print("Please run ./compile.sh first to compile the C++ code.")
+        print("Please build with CMake first:")
+        print("  cmake -B build && cmake --build build")
         return 1
 
-    print(f"Loading object file: {obj_file}")
+    print(f"Loading object file: {obj_file} (lang={args.lang})")
 
     # Create execution session and dynamic library
     session = ExecutionSession()
     lib = session.create_library()
     lib.add(str(obj_file))
 
-    print("✓ Object file loaded successfully\n")
+    print("Object file loaded successfully\n")
 
     # Get and call the 'add' function
     print("=== Testing add function ===")
@@ -76,21 +95,23 @@ def main() -> int:
     print(f"fibonacci(10) = {result}")
     assert result == 55, f"Expected 55, got {result}"
 
-    # Get and call the 'concat' function
-    print("\n=== Testing concat function ===")
-    concat = lib.get_function("concat")
-    result = concat("Hello, ", "World!")
-    print(f"concat('Hello, ', 'World!') = '{result}'")
-    assert result == "Hello, World!", f"Expected 'Hello, World!', got '{result}'"
-    # Release the returned String object before JIT module is destroyed
-    del result
+    if args.lang == "cpp":
+        # String concatenation only available in C++ variant (uses std::string)
+        print("\n=== Testing concat function ===")
+        concat = lib.get_function("concat")
+        result = concat("Hello, ", "World!")
+        print(f"concat('Hello, ', 'World!') = '{result}'")
+        assert result == "Hello, World!", f"Expected 'Hello, World!', got '{result}'"
+        # Release the returned String object before JIT module is destroyed
+        del result
+        del concat
 
     print("\n" + "=" * 50)
-    print("✓ All tests passed successfully!")
+    print("All tests passed successfully!")
     print("=" * 50)
 
     # Cleanup: release references in correct order (functions, lib, session)
-    del add, multiply, fibonacci, concat
+    del add, multiply, fibonacci
     del lib
     del session
 

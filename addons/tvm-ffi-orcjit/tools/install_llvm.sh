@@ -16,9 +16,13 @@ case "$(uname -s)-$(uname -m)" in
   *)              echo "Unsupported: $(uname -s)-$(uname -m)"; exit 1 ;;
 esac
 
-# Install micromamba
-curl -Ls "https://micro.mamba.pm/api/micromamba/${PLATFORM}/latest" \
-  | tar -xvj -C /usr/local bin/micromamba
+# Install micromamba (retry up to 3 times for transient CDN failures)
+for i in 1 2 3; do
+  curl -Ls "https://micro.mamba.pm/api/micromamba/${PLATFORM}/latest" \
+    | tar -xvj -C /usr/local bin/micromamba && break
+  echo "micromamba download attempt $i failed, retrying..."
+  sleep 5
+done
 
 # Create environment with LLVM
 # zlib conda package provides a PIC-compiled libz.a suitable for shared libs

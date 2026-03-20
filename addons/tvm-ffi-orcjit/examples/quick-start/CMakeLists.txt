@@ -36,23 +36,33 @@ execute_process(
 )
 find_package(tvm_ffi CONFIG REQUIRED)
 
-# Create object library (not a shared library, just object files)
-add_library(add_obj OBJECT add.cc)
-target_link_libraries(add_obj PRIVATE tvm_ffi::header)
-
-# Set compiler flags
-target_compile_options(add_obj PRIVATE -O2)
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-  target_compile_options(add_obj PRIVATE -mno-outline-atomics)
+# C++ object file — skip on Windows (C-only strategy for ORC JIT on Windows)
+if(NOT WIN32)
+  add_library(add_obj OBJECT add.cc)
+  target_link_libraries(add_obj PRIVATE tvm_ffi::header)
+  target_compile_options(add_obj PRIVATE -O2)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    target_compile_options(add_obj PRIVATE -mno-outline-atomics)
+  endif()
+  add_custom_target(
+    copy_cpp_obj ALL
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_OBJECTS:add_obj> ${CMAKE_CURRENT_SOURCE_DIR}/add.o
+    DEPENDS add_obj
+    COMMENT "Copying add.o to example directory"
+  )
 endif()
 
-# Custom target to copy the object file to the example directory
+# Pure C object file — built on all platforms
+enable_language(C)
+add_library(add_c_obj OBJECT add_c.c)
+target_link_libraries(add_c_obj PRIVATE tvm_ffi::header)
+target_compile_options(add_c_obj PRIVATE -O2)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+  target_compile_options(add_c_obj PRIVATE -mno-outline-atomics)
+endif()
 add_custom_target(
-  copy_obj_file ALL
-  COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_OBJECTS:add_obj> ${CMAKE_CURRENT_SOURCE_DIR}/add.o
-  COMMAND ${CMAKE_COMMAND} -E echo "Successfully compiled add.o"
-  COMMAND ${CMAKE_COMMAND} -E echo ""
-  COMMAND ${CMAKE_COMMAND} -E echo "You can now run: python run.py"
-  DEPENDS add_obj
-  COMMENT "Copying add.o to example directory"
+  copy_c_obj ALL
+  COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_OBJECTS:add_c_obj> ${CMAKE_CURRENT_SOURCE_DIR}/add_c.o
+  DEPENDS add_c_obj
+  COMMENT "Copying add_c.o to example directory"
 )
