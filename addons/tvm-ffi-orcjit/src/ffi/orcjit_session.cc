@@ -41,7 +41,6 @@
 #include <tvm/ffi/reflection/registry.h>
 
 #include <cstddef>
-#include <typeinfo>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -137,14 +136,7 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
             BaseAddr = B->getAddress();
           }
         }
-        fprintf(stderr, "[OrcJIT] Setting __ImageBase = 0x%llx for graph '%s'\n",
-                (unsigned long long)BaseAddr.getValue(), G.getName().c_str());
-        fflush(stderr);
         ImageBase->getAddressable().setAddress(BaseAddr);
-      } else {
-        fprintf(stderr, "[OrcJIT] __ImageBase not found in external symbols for '%s'\n",
-                G.getName().c_str());
-        fflush(stderr);
       }
       // Strip .pdata/.xdata edges: external handlers may be >4GB from
       // __ImageBase, and we don't register SEH data anyway.
@@ -293,64 +285,6 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
 };
 
 #ifdef _WIN32
-// ---- Static CRT symbol stubs ----
-// The MSVC C++ runtime is split: vcruntime140.dll exports a subset, while
-// symbols like _Init_thread_header, operator delete(void*,size_t), and the
-// type_info vtable live only in the static vcruntime.lib. Since we link COFF
-// objects at runtime via JITLink (no static lib linking), we provide our own
-// implementations of these symbols.
-
-// Thread-safe static initialization (C++11 magic statics).
-// Protocol: guard==0 → uninitialized, guard==-1 → being initialized, guard==1 → done.
-static SRWLOCK g_tss_lock = SRWLOCK_INIT;
-static CONDITION_VARIABLE g_tss_cv = CONDITION_VARIABLE_INIT;
-
-static void stub_Init_thread_header(int* guard) {
-  AcquireSRWLockExclusive(&g_tss_lock);
-  if (*guard == 0) {
-    *guard = -1;  // caller will initialize
-  } else {
-    while (*guard == -1) {
-      SleepConditionVariableSRW(&g_tss_cv, &g_tss_lock, INFINITE, 0);
-    }
-  }
-  ReleaseSRWLockExclusive(&g_tss_lock);
-}
-
-static void stub_Init_thread_footer(int* guard) {
-  AcquireSRWLockExclusive(&g_tss_lock);
-  *guard = 1;
-  ReleaseSRWLockExclusive(&g_tss_lock);
-  WakeAllConditionVariable(&g_tss_cv);
-}
-
-static void stub_Init_thread_abort(int* guard) {
-  AcquireSRWLockExclusive(&g_tss_lock);
-  *guard = 0;
-  ReleaseSRWLockExclusive(&g_tss_lock);
-  WakeAllConditionVariable(&g_tss_cv);
-}
-
-// Sized deallocation: operator delete(void*, size_t) — ??3@YAXPEAX_K@Z
-static void stub_operator_delete_sized(void* ptr, size_t) { free(ptr); }
-
-// type_info vtable: ??_7type_info@@6B@
-// Extract from the host process's own statically-linked type_info.
-static void* get_type_info_vtable() {
-  const std::type_info& ti = typeid(int);
-  return *reinterpret_cast<void* const*>(&ti);
-}
-
-// Look up symbols that exist only in vcruntime's static library.
-static void* FindStaticCRTSymbol(const std::string& Name) {
-  if (Name == "_Init_thread_header") return reinterpret_cast<void*>(&stub_Init_thread_header);
-  if (Name == "_Init_thread_footer") return reinterpret_cast<void*>(&stub_Init_thread_footer);
-  if (Name == "_Init_thread_abort") return reinterpret_cast<void*>(&stub_Init_thread_abort);
-  if (Name == "??3@YAXPEAX_K@Z") return reinterpret_cast<void*>(&stub_operator_delete_sized);
-  if (Name == "??_7type_info@@6B@") return get_type_info_vtable();
-  return nullptr;
-}
-
 /*!
  * \brief Custom definition generator for Windows DLL import symbols.
  *
@@ -370,7 +304,6 @@ static void* FindStaticCRTSymbol(const std::string& Name) {
  *   1. Specific MSVC runtime DLLs (vcruntime140, ucrtbase, msvcp140)
  *   2. All loaded process modules (EnumProcessModules)
  *   3. LLVM's SearchForAddressOfSymbol
- *   4. Static CRT stubs (_Init_thread_*, operator delete, type_info vtable)
  */
 class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
   llvm::orc::ExecutionSession& ES_;
@@ -421,8 +354,6 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
                             llvm::orc::JITDylibLookupFlags JDLookupFlags,
                             const llvm::orc::SymbolLookupSet& LookupSet) override {
     // Step 1: Collect unique base names (strip __imp_ prefix) and resolve addresses.
-    fprintf(stderr, "[DLLImport] tryToGenerate: %zu symbols requested\n", LookupSet.size());
-    fflush(stderr);
     llvm::DenseMap<llvm::orc::SymbolStringPtr, llvm::orc::ExecutorAddr> Resolved;
     for (auto& [Name, Flags] : LookupSet) {
       llvm::StringRef NameStr = *Name;
@@ -431,22 +362,11 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
       if (BaseName == "__ImageBase") continue;
       auto InternedBase = ES_.intern(BaseName);
       if (Resolved.count(InternedBase)) continue;
-      if (BaseName == "_tls_index") {
-        static DWORD jit_tls_index = TlsAlloc();
-        Resolved[InternedBase] = llvm::orc::ExecutorAddr::fromPtr(&jit_tls_index);
-        fprintf(stderr, "[DLLImport]   %s -> _tls_index stub\n", BaseName.c_str());
-        continue;
-      }
       void* Addr = FindInProcessModules(BaseName);
-      if (!Addr) Addr = FindStaticCRTSymbol(BaseName);
       if (Addr) {
         Resolved[InternedBase] = llvm::orc::ExecutorAddr::fromPtr(Addr);
-        fprintf(stderr, "[DLLImport]   %s -> %p\n", BaseName.c_str(), Addr);
-      } else {
-        fprintf(stderr, "[DLLImport]   %s -> NOT FOUND\n", BaseName.c_str());
       }
     }
-    fflush(stderr);
     if (Resolved.empty()) return llvm::Error::success();
 
     // Step 2: Build a LinkGraph with __imp_ pointers and PLT jump stubs.
@@ -540,41 +460,15 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
       std::make_unique<InitFiniPlugin>(GetRef<ORCJITExecutionSession>(this)));
 #endif
 #ifdef _WIN32
-  // Pre-load MSVC runtime DLLs into LLVM's permanent library set so
-  // SearchForAddressOfSymbol can find their exports.
-  fprintf(stderr, "[OrcJIT] Pre-loading runtime DLLs...\n");
-  for (const char* dll : {"vcruntime140.dll", "ucrtbase.dll", "msvcp140.dll"}) {
-    std::string err;
-    bool failed = llvm::sys::DynamicLibrary::LoadLibraryPermanently(dll, &err);
-    fprintf(stderr, "[OrcJIT]   LoadLibraryPermanently(%s): %s\n", dll,
-            failed ? err.c_str() : "OK");
-  }
   // On Windows, the default process-symbol generator only searches the main
   // exe module via GetProcAddress(GetModuleHandle(NULL), ...). Add a
   // comprehensive generator that searches all loaded DLLs (vcruntime140,
-  // msvcp140, ucrtbase, tvm_ffi, etc.) and creates __imp_* pointer stubs.
+  // ucrtbase, tvm_ffi, etc.) and creates __imp_* pointer stubs.
   if (auto PSG = jit_->getProcessSymbolsJITDylib()) {
-    fprintf(stderr, "[OrcJIT] ProcessSymbols JITDylib found: '%s'\n", PSG->getName().c_str());
     auto& ObjLayer =
         static_cast<llvm::orc::ObjectLinkingLayer&>(jit_->getObjLinkingLayer());
     PSG->addGenerator(std::make_unique<DLLImportDefinitionGenerator>(
         jit_->getExecutionSession(), ObjLayer));
-    fprintf(stderr, "[OrcJIT] Added DLLImportDefinitionGenerator\n");
-  } else {
-    fprintf(stderr, "[OrcJIT] WARNING: ProcessSymbols JITDylib is NULL!\n");
-  }
-
-  // Quick sanity check: can we find the target symbols right now?
-  fprintf(stderr, "[OrcJIT] Quick GetProcAddress sanity check:\n");
-  if (HMODULE hVcrt = LoadLibraryA("vcruntime140.dll")) {
-    const char* test_syms[] = {"_Init_thread_header", "??_7type_info@@6B@", "??3@YAXPEAX_K@Z"};
-    for (const char* sym : test_syms) {
-      auto addr = GetProcAddress(hVcrt, sym);
-      fprintf(stderr, "[OrcJIT]   GetProcAddress(vcrt, \"%s\") = %p\n", sym,
-              reinterpret_cast<void*>(addr));
-    }
-  } else {
-    fprintf(stderr, "[OrcJIT]   LoadLibraryA(vcruntime140.dll) FAILED!\n");
   }
 #endif
 }

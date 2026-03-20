@@ -41,47 +41,60 @@ execute_process(
 )
 find_package(tvm_ffi CONFIG REQUIRED)
 
-# Create object library for test functions
-add_library(test_funcs_obj OBJECT sources/test_funcs.cc)
-target_link_libraries(test_funcs_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs_obj PRIVATE -O2)
-install(
-  FILES $<TARGET_OBJECTS:test_funcs_obj>
-  DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
-  RENAME test_funcs.o
-)
+# C++ object files — skip on Windows (C-only strategy for ORC JIT on Windows)
+if(NOT WIN32)
+  # Create object library for test functions
+  add_library(test_funcs_obj OBJECT sources/test_funcs.cc)
+  target_link_libraries(test_funcs_obj PRIVATE tvm_ffi::header)
+  target_compile_options(test_funcs_obj PRIVATE -O2)
+  install(
+    FILES $<TARGET_OBJECTS:test_funcs_obj>
+    DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
+    RENAME test_funcs.o
+  )
 
-# Create object library for second set of test functions
-add_library(test_funcs2_obj OBJECT sources/test_funcs2.cc)
-target_link_libraries(test_funcs2_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs2_obj PRIVATE -O2)
-install(
-  FILES $<TARGET_OBJECTS:test_funcs2_obj>
-  DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
-  RENAME test_funcs2.o
-)
+  # Create object library for second set of test functions
+  add_library(test_funcs2_obj OBJECT sources/test_funcs2.cc)
+  target_link_libraries(test_funcs2_obj PRIVATE tvm_ffi::header)
+  target_compile_options(test_funcs2_obj PRIVATE -O2)
+  install(
+    FILES $<TARGET_OBJECTS:test_funcs2_obj>
+    DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
+    RENAME test_funcs2.o
+  )
 
-# Create object library for conflicting test functions
-add_library(test_funcs_conflict_obj OBJECT sources/test_funcs_conflict.cc)
-target_link_libraries(test_funcs_conflict_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs_conflict_obj PRIVATE -O2)
-install(
-  FILES $<TARGET_OBJECTS:test_funcs_conflict_obj>
-  DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
-  RENAME test_funcs_conflict.o
-)
+  # Create object library for conflicting test functions
+  add_library(test_funcs_conflict_obj OBJECT sources/test_funcs_conflict.cc)
+  target_link_libraries(test_funcs_conflict_obj PRIVATE tvm_ffi::header)
+  target_compile_options(test_funcs_conflict_obj PRIVATE -O2)
+  install(
+    FILES $<TARGET_OBJECTS:test_funcs_conflict_obj>
+    DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
+    RENAME test_funcs_conflict.o
+  )
 
-# Create object library for constructor/destructor test functions
-add_library(test_ctor_dtor_obj OBJECT sources/test_ctor_dtor.cc)
-target_link_libraries(test_ctor_dtor_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_ctor_dtor_obj PRIVATE -O2)
-install(
-  FILES $<TARGET_OBJECTS:test_ctor_dtor_obj>
-  DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
-  RENAME test_ctor_dtor.o
-)
+  # Create object library for constructor/destructor test functions
+  add_library(test_ctor_dtor_obj OBJECT sources/test_ctor_dtor.cc)
+  target_link_libraries(test_ctor_dtor_obj PRIVATE tvm_ffi::header)
+  target_compile_options(test_ctor_dtor_obj PRIVATE -O2)
+  install(
+    FILES $<TARGET_OBJECTS:test_ctor_dtor_obj>
+    DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
+    RENAME test_ctor_dtor.o
+  )
 
-# Create object library for pure C test functions (no C++ runtime deps)
+  # Create object library for C++ global function callback test
+  add_library(test_call_global_obj OBJECT sources/test_call_global.cc)
+  target_link_libraries(test_call_global_obj PRIVATE tvm_ffi::header)
+  target_compile_options(test_call_global_obj PRIVATE -O2)
+  install(
+    FILES $<TARGET_OBJECTS:test_call_global_obj>
+    DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
+    RENAME test_call_global.o
+  )
+endif()
+
+# Pure C object files — built on all platforms (no C++ runtime deps)
 enable_language(C)
 add_library(test_funcs_c_obj OBJECT sources/test_funcs_c.c)
 target_link_libraries(test_funcs_c_obj PRIVATE tvm_ffi::header)
@@ -90,6 +103,34 @@ install(
   FILES $<TARGET_OBJECTS:test_funcs_c_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
   RENAME test_funcs_c.o
+)
+
+add_library(test_funcs2_c_obj OBJECT sources/test_funcs2_c.c)
+target_link_libraries(test_funcs2_c_obj PRIVATE tvm_ffi::header)
+target_compile_options(test_funcs2_c_obj PRIVATE -O2)
+install(
+  FILES $<TARGET_OBJECTS:test_funcs2_c_obj>
+  DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
+  RENAME test_funcs2_c.o
+)
+
+add_library(test_funcs_conflict_c_obj OBJECT sources/test_funcs_conflict_c.c)
+target_link_libraries(test_funcs_conflict_c_obj PRIVATE tvm_ffi::header)
+target_compile_options(test_funcs_conflict_c_obj PRIVATE -O2)
+install(
+  FILES $<TARGET_OBJECTS:test_funcs_conflict_c_obj>
+  DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
+  RENAME test_funcs_conflict_c.o
+)
+
+# Pure C global function callback test — built on all platforms
+add_library(test_call_global_c_obj OBJECT sources/test_call_global_c.c)
+target_link_libraries(test_call_global_c_obj PRIVATE tvm_ffi::header)
+target_compile_options(test_call_global_c_obj PRIVATE -O2)
+install(
+  FILES $<TARGET_OBJECTS:test_call_global_c_obj>
+  DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
+  RENAME test_call_global_c.o
 )
 
 find_package(CUDAToolkit)

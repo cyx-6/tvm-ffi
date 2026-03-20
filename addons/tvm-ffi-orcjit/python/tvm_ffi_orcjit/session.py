@@ -30,12 +30,11 @@ def _find_orc_rt_library() -> str | None:
 
     # Windows: skip ORC runtime entirely. LLVM's COFFPlatform (loaded via
     # ExecutorNativePlatform with liborc_rt) depends on MSVC C++ runtime symbols
-    # (_CxxThrowException, RTTI type_info, iostream vtables, etc.) that are not
-    # available in the JIT environment. These symbols live in vcruntime*.dll and
-    # msvcp*.dll and cannot be resolved by the ORC process-symbols generator.
-    # Instead we use our custom InitFiniPlugin (via ObjectLinkingLayer) which
-    # collects .CRT$XC*/.CRT$XT* section entries and runs them in priority order,
-    # handling C++ static constructors/destructors without needing the ORC runtime.
+    # that are not available in the JIT environment. On Windows, ORC JIT uses a
+    # C-only strategy: JIT objects are compiled as pure C (TVMFFISafeCallType ABI),
+    # avoiding all C++ runtime dependencies (magic statics, RTTI, sized delete,
+    # SEH, COMDAT). Our custom InitFiniPlugin handles .CRT$XC*/.CRT$XT* init/fini
+    # sections, and DLLImportDefinitionGenerator resolves __imp_ DLL import stubs.
     if sys.platform == "win32":
         return None
     patterns = ["liborc_rt*.a"]
