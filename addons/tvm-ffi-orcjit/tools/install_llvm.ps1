@@ -25,7 +25,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 if (-not $Version) {
     $Version = if ($env:LLVM_VERSION) { $env:LLVM_VERSION } else { "22.1.0" }
@@ -46,7 +45,10 @@ if (-not (Test-Path $MicromambaExe)) {
     $maxRetries = 3
     for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
         try {
-            Invoke-WebRequest -Uri $MicromambaUrl -OutFile $tarball
+            # Use curl.exe (native Windows curl) instead of Invoke-WebRequest
+            # to avoid .NET TLS certificate trust issues on GitHub Actions runners.
+            & curl.exe -sSL -o $tarball $MicromambaUrl
+            if ($LASTEXITCODE -ne 0) { throw "curl failed with exit code $LASTEXITCODE" }
             # Extract using tar (available on Windows 10+)
             tar -xvjf $tarball -C $MicromambaDir
             break
@@ -80,7 +82,8 @@ $ZstdSrc = "$env:TEMP\zstd-$ZstdVersion"
 
 Write-Host "Building zstd $ZstdVersion from source..."
 if (-not (Test-Path $ZstdTarball)) {
-    Invoke-WebRequest -Uri "https://github.com/facebook/zstd/releases/download/v$ZstdVersion/zstd-$ZstdVersion.tar.gz" -OutFile $ZstdTarball
+    & curl.exe -sSL -o $ZstdTarball "https://github.com/facebook/zstd/releases/download/v$ZstdVersion/zstd-$ZstdVersion.tar.gz"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to download zstd" }
 }
 if (Test-Path $ZstdSrc) { Remove-Item -Recurse -Force $ZstdSrc }
 tar -xzf $ZstdTarball -C $env:TEMP
