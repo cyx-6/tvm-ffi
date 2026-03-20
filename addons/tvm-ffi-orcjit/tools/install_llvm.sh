@@ -16,9 +16,17 @@ case "$(uname -s)-$(uname -m)" in
   *)              echo "Unsupported: $(uname -s)-$(uname -m)"; exit 1 ;;
 esac
 
-# Install micromamba (retry up to 3 times for transient CDN failures)
+# Map platform to GitHub release asset name
+case "${PLATFORM}" in
+  linux-64)      MAMBA_ASSET="micromamba-linux-64" ;;
+  linux-aarch64) MAMBA_ASSET="micromamba-linux-aarch64" ;;
+  osx-64)        MAMBA_ASSET="micromamba-osx-64" ;;
+  osx-arm64)     MAMBA_ASSET="micromamba-osx-arm64" ;;
+esac
+
+# Install micromamba from GitHub releases (micro.mamba.pm cert expired as of 2026-03)
 for i in 1 2 3; do
-  curl -Ls "https://micro.mamba.pm/api/micromamba/${PLATFORM}/latest" \
+  curl -sSL "https://github.com/mamba-org/micromamba-releases/releases/latest/download/${MAMBA_ASSET}" \
     | tar -xvj -C /usr/local bin/micromamba && break
   echo "micromamba download attempt $i failed, retrying..."
   sleep 5

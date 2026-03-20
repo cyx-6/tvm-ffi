@@ -32,10 +32,13 @@ from tvm_ffi_orcjit import ExecutionSession
 
 TEST_DIR = Path(__file__).parent
 
-skip_on_windows = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="C++ object files not built on Windows (C-only strategy)",
-)
+_KNOWN_SUBDIRS = [
+    "cc", "c",                          # default (LLVM clang)
+    "cc-gcc", "c-gcc",                  # GCC (Linux)
+    "cc-appleclang", "c-appleclang",    # Apple Clang (macOS)
+    "c-msvc",                           # MSVC (Windows, C only)
+    "c-clang-cl",                       # clang-cl (Windows, C only)
+]
 
 
 def obj(name: str) -> str:
@@ -100,15 +103,18 @@ class Variant:
         return base_name
 
     def __repr__(self) -> str:
-        return "C" if self.subdir == "c" else "C++"
+        parts = self.subdir.split("-", 1)
+        lang = "C++" if parts[0] == "cc" else "C"
+        return f"{lang}-{parts[1]}" if len(parts) > 1 else lang
 
 
-CPP = Variant("cc")
-C = Variant("c")
+def _discover_variants():
+    return [Variant(s) for s in _KNOWN_SUBDIRS
+            if (TEST_DIR / s / "test_funcs.o").exists()]
 
-# On Windows, only C variant is available
-_all_variants = [CPP, C] if sys.platform != "win32" else [C]
-_cpp_only = [CPP] if sys.platform != "win32" else []
+
+_all_variants = _discover_variants()
+_cpp_only = [v for v in _all_variants if v.subdir.startswith("cc")]
 
 
 def _variant_id(v: Variant) -> str:
@@ -409,7 +415,13 @@ def test_ctor_dtor(v: Variant) -> None:
     pre = log[:main_idx]
     post = log[main_idx:]
 
-    if sys.platform == "linux":
+    if v.subdir.endswith(("-msvc", "-clang-cl")):
+        # MSVC or clang-cl: COFF .CRT$XC* sections in alphabetical order + atexit
+        assert pre.index("<crt.XCA>") < pre.index("<crt.XCB>")
+        assert pre.index("<crt.XCB>") < pre.index("<crt.XCC>")
+        assert pre.index("<crt.XCC>") < pre.index("<crt.XCU>")
+        assert "<atexit>" in post
+    elif sys.platform == "linux":
         # ELF: init_array (priority order) + .ctors (reversed priority)
         assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
         assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
@@ -429,15 +441,8 @@ def test_ctor_dtor(v: Variant) -> None:
         assert post.index("<fini_array.102>") < post.index("<fini_array.101>")
         assert "<ctors>" not in log
         assert "<dtors>" not in log
-    elif sys.platform == "win32":
-        if "<crt.XCA>" in pre:
-            # MSVC-compiled: COFF .CRT$XC* sections in alphabetical order + atexit
-            assert pre.index("<crt.XCA>") < pre.index("<crt.XCB>")
-            assert pre.index("<crt.XCB>") < pre.index("<crt.XCC>")
-            assert pre.index("<crt.XCC>") < pre.index("<crt.XCU>")
-            assert "<atexit>" in post
-        else:
-            # Clang-compiled: __attribute__((constructor/destructor))
-            assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
-            assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
-            assert pre.index("<init_array.103>") < pre.index("<init_array>")
+    else:
+        # Windows non-MSVC (Clang): __attribute__((constructor/destructor))
+        assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
+        assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
+        assert pre.index("<init_array.103>") < pre.index("<init_array>")

@@ -22,6 +22,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+set(TEST_OBJ_INSTALL_SUFFIX "" CACHE STRING "Suffix for install subdirectory (e.g., -gcc)")
+
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
   add_compile_options(-mno-outline-atomics)
 endif()
@@ -57,7 +59,7 @@ function(add_test_object source)
   endif()
   install(
     FILES $<TARGET_OBJECTS:${_target}_obj>
-    DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/${_subdir}
+    DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/${_subdir}${TEST_OBJ_INSTALL_SUFFIX}
     RENAME ${_name}.o
   )
 endfunction()
