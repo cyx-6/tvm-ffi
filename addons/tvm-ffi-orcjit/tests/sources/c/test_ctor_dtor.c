@@ -29,8 +29,6 @@
  */
 #include <tvm/ffi/c_api.h>
 
-#ifdef _MSC_VER
-
 static void puts_log(const char* msg) {
   TVMFFIByteArray func_name;
   TVMFFIObjectHandle func_handle = NULL;
