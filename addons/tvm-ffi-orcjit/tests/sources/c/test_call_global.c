@@ -24,10 +24,10 @@
 #include <tvm/ffi/c_api.h>
 
 /*
- * test_call_global_add_c: look up "test_host_add" global function and call it
+ * test_call_global_add: look up "test_host_add" global function and call it
  * with two integer arguments. Returns the result from the host function.
  */
-TVM_FFI_DLL_EXPORT int __tvm_ffi_test_call_global_add_c(
+TVM_FFI_DLL_EXPORT int __tvm_ffi_test_call_global_add(
     void* self, const TVMFFIAny* args, int32_t num_args, TVMFFIAny* result) {
   int ret_code = 0;
   TVMFFIByteArray func_name;
@@ -68,9 +68,9 @@ TVM_FFI_DLL_EXPORT int __tvm_ffi_test_call_global_add_c(
 }
 
 /*
- * test_call_global_mul_c: look up "test_host_multiply" global function and call it.
+ * test_call_global_mul: look up "test_host_multiply" global function and call it.
  */
-TVM_FFI_DLL_EXPORT int __tvm_ffi_test_call_global_mul_c(
+TVM_FFI_DLL_EXPORT int __tvm_ffi_test_call_global_mul(
     void* self, const TVMFFIAny* args, int32_t num_args, TVMFFIAny* result) {
   int ret_code = 0;
   TVMFFIByteArray func_name;

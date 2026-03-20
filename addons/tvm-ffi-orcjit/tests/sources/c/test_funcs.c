@@ -18,25 +18,26 @@
  */
 
 /*
- * Pure C test functions (subtract, divide) using the TVMFFISafeCallType ABI directly.
- * C version of test_funcs2.cc — no C++ runtime dependencies.
+ * Pure C test functions using the TVMFFISafeCallType ABI directly.
+ * No C++ features: no exceptions, RTTI, static variables, or std library.
+ * This isolates the JIT infrastructure from MSVC C++ runtime issues.
  */
 #include <tvm/ffi/c_api.h>
 
-/* test_subtract_c: subtract two integers */
-TVM_FFI_DLL_EXPORT int __tvm_ffi_test_subtract_c(
+/* test_add: add two integers */
+TVM_FFI_DLL_EXPORT int __tvm_ffi_test_add(
     void* self, const TVMFFIAny* args, int32_t num_args, TVMFFIAny* result) {
   result->type_index = kTVMFFIInt;
   result->zero_padding = 0;
-  result->v_int64 = args[0].v_int64 - args[1].v_int64;
+  result->v_int64 = args[0].v_int64 + args[1].v_int64;
   return 0;
 }
 
-/* test_divide_c: divide two integers */
-TVM_FFI_DLL_EXPORT int __tvm_ffi_test_divide_c(
+/* test_multiply: multiply two integers */
+TVM_FFI_DLL_EXPORT int __tvm_ffi_test_multiply(
     void* self, const TVMFFIAny* args, int32_t num_args, TVMFFIAny* result) {
   result->type_index = kTVMFFIInt;
   result->zero_padding = 0;
-  result->v_int64 = args[0].v_int64 / args[1].v_int64;
+  result->v_int64 = args[0].v_int64 * args[1].v_int64;
   return 0;
 }

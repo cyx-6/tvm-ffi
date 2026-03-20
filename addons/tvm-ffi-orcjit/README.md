@@ -204,9 +204,9 @@ tvm-ffi-orcjit/
 │   ├── CMakeLists.txt          # Test object file builds
 │   ├── test_basic.py           # Python tests
 │   └── sources/
-│       ├── test_funcs.cc       # Test functions
-│       ├── test_funcs2.cc      # Additional test functions
-│       └── test_funcs_conflict.cc  # Conflicting symbols for testing
+│       ├── c/                  # Pure C test sources (all platforms)
+│       ├── cc/                 # C++ test sources (Linux/macOS only)
+│       └── cuda/               # CUDA test sources (optional)
 └── examples/
     └── quick-start/            # Complete example with CMake
 ```

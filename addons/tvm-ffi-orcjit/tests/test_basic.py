@@ -56,39 +56,39 @@ def make_lib(*obj_names: str, session: ExecutionSession | None = None, name: str
 
 
 # ---------------------------------------------------------------------------
-# Variants: C uses "_c" suffix on object files and function names;
-# C++ uses no suffix.  Tests are parametrized over both variants where the
-# logic is identical.
+# Variants: C and C++ sources live in separate subdirectories (c/, cc/).
+# Function names are identical; only the object file path differs.
+# Tests are parametrized over both variants where the logic is identical.
 # ---------------------------------------------------------------------------
 
 
 class Variant:
-    """Describes a C or C++ test variant (object file / function name mapping)."""
+    """Describes a C or C++ test variant (object file path mapping)."""
 
-    def __init__(self, suffix: str):
-        self.suffix = suffix  # "" for C++, "_c" for C
+    def __init__(self, subdir: str):
+        self.subdir = subdir  # "cc" for C++, "c" for C
 
     def funcs_obj(self):
-        return f"test_funcs{self.suffix}"
+        return f"{self.subdir}/test_funcs"
 
     def funcs2_obj(self):
-        return f"test_funcs2{self.suffix}"
+        return f"{self.subdir}/test_funcs2"
 
     def conflict_obj(self):
-        return f"test_funcs_conflict{self.suffix}"
+        return f"{self.subdir}/test_funcs_conflict"
 
     def call_global_obj(self):
-        return f"test_call_global{self.suffix}"
+        return f"{self.subdir}/test_call_global"
 
     def fn(self, base_name: str) -> str:
-        return f"{base_name}{self.suffix}"
+        return base_name
 
     def __repr__(self) -> str:
-        return "C" if self.suffix else "C++"
+        return "C" if self.subdir == "c" else "C++"
 
 
-CPP = Variant("")
-C = Variant("_c")
+CPP = Variant("cc")
+C = Variant("c")
 
 # On Windows, only C variant is available
 _all_variants = [CPP, C] if sys.platform != "win32" else [C]
@@ -251,7 +251,7 @@ def test_call_global(v: Variant) -> None:
 
 
 def test_load_and_execute_cuda_function() -> None:
-    _, lib = make_lib("test_funcs_cuda")
+    _, lib = make_lib("cuda/test_funcs")
     assert lib.get_function("test_add")(10, 20) == 30
     assert lib.get_function("test_multiply")(7, 6) == 42
 
@@ -270,7 +270,7 @@ def test_ctor_dtor() -> None:
         nonlocal log
         log += x
 
-    _, lib = make_lib("test_ctor_dtor")
+    _, lib = make_lib("cc/test_ctor_dtor")
     lib.get_function("main")()
     del lib
 

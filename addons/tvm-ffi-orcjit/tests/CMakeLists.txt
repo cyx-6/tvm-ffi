@@ -35,48 +35,53 @@ execute_process(
 )
 find_package(tvm_ffi CONFIG REQUIRED)
 
-# Helper: build a single source file into an object and install as <name>.o
-function(add_test_object name source)
+# Helper: build a source file into an object and install as <subdir>/<name>.o
+# Derives the target name and install subdirectory from the source path.
+function(add_test_object source)
+  get_filename_component(_name "${source}" NAME_WE)
   get_filename_component(_ext "${source}" EXT)
+  get_filename_component(_dir "${source}" DIRECTORY)
+  get_filename_component(_subdir "${_dir}" NAME)
+  set(_target "${_subdir}_${_name}")
   if(_ext STREQUAL ".c")
     set(_lang C)
   else()
     set(_lang CXX)
   endif()
-  add_library(${name}_obj OBJECT "${source}")
-  target_link_libraries(${name}_obj PRIVATE tvm_ffi::header)
+  add_library(${_target}_obj OBJECT "${source}")
+  target_link_libraries(${_target}_obj PRIVATE tvm_ffi::header)
   if(_lang STREQUAL "C" AND MSVC)
-    target_compile_options(${name}_obj PRIVATE /O2)
+    target_compile_options(${_target}_obj PRIVATE /O2)
   else()
-    target_compile_options(${name}_obj PRIVATE -O2)
+    target_compile_options(${_target}_obj PRIVATE -O2)
   endif()
   install(
-    FILES $<TARGET_OBJECTS:${name}_obj>
-    DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
-    RENAME ${name}.o
+    FILES $<TARGET_OBJECTS:${_target}_obj>
+    DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/${_subdir}
+    RENAME ${_name}.o
   )
 endfunction()
 
 # C++ object files — skip on Windows (C-only strategy for ORC JIT on Windows)
 if(NOT WIN32)
-  add_test_object(test_funcs          sources/test_funcs.cc)
-  add_test_object(test_funcs2         sources/test_funcs2.cc)
-  add_test_object(test_funcs_conflict sources/test_funcs_conflict.cc)
-  add_test_object(test_ctor_dtor      sources/test_ctor_dtor.cc)
-  add_test_object(test_call_global    sources/test_call_global.cc)
+  add_test_object(sources/cc/test_funcs.cc)
+  add_test_object(sources/cc/test_funcs2.cc)
+  add_test_object(sources/cc/test_funcs_conflict.cc)
+  add_test_object(sources/cc/test_ctor_dtor.cc)
+  add_test_object(sources/cc/test_call_global.cc)
 endif()
 
 # Pure C object files — built on all platforms (no C++ runtime deps)
 enable_language(C)
-add_test_object(test_funcs_c          sources/test_funcs_c.c)
-add_test_object(test_funcs2_c         sources/test_funcs2_c.c)
-add_test_object(test_funcs_conflict_c sources/test_funcs_conflict_c.c)
-add_test_object(test_call_global_c    sources/test_call_global_c.c)
+add_test_object(sources/c/test_funcs.c)
+add_test_object(sources/c/test_funcs2.c)
+add_test_object(sources/c/test_funcs_conflict.c)
+add_test_object(sources/c/test_call_global.c)
 
 # CUDA object files — optional
 find_package(CUDAToolkit)
 if(CUDAToolkit_FOUND)
   enable_language(CUDA)
   message(STATUS "CUDA found: ${CUDAToolkit_VERSION}")
-  add_test_object(test_funcs_cuda sources/test_funcs_cuda.cu)
+  add_test_object(sources/cuda/test_funcs.cu)
 endif()

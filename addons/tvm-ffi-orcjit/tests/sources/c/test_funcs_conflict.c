@@ -19,13 +19,13 @@
 
 /*
  * Pure C conflicting test functions using the TVMFFISafeCallType ABI directly.
- * C version of test_funcs_conflict.cc — same symbol names as test_funcs_c.c
+ * C version of test_funcs_conflict.cc — same symbol names as test_funcs.c
  * but different implementations to test symbol conflict handling.
  */
 #include <tvm/ffi/c_api.h>
 
-/* test_add_c: conflicting add — adds 1000 to the result */
-TVM_FFI_DLL_EXPORT int __tvm_ffi_test_add_c(
+/* test_add: conflicting add — adds 1000 to the result */
+TVM_FFI_DLL_EXPORT int __tvm_ffi_test_add(
     void* self, const TVMFFIAny* args, int32_t num_args, TVMFFIAny* result) {
   result->type_index = kTVMFFIInt;
   result->zero_padding = 0;
@@ -33,8 +33,8 @@ TVM_FFI_DLL_EXPORT int __tvm_ffi_test_add_c(
   return 0;
 }
 
-/* test_multiply_c: conflicting multiply — doubles the result */
-TVM_FFI_DLL_EXPORT int __tvm_ffi_test_multiply_c(
+/* test_multiply: conflicting multiply — doubles the result */
+TVM_FFI_DLL_EXPORT int __tvm_ffi_test_multiply(
     void* self, const TVMFFIAny* args, int32_t num_args, TVMFFIAny* result) {
   result->type_index = kTVMFFIInt;
   result->zero_padding = 0;
