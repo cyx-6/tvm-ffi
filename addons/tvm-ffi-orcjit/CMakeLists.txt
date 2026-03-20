@@ -135,63 +135,24 @@ elseif(UNIX AND NOT WIN32)
 endif()
 
 # ---- Find and bundle liborc_rt ----
-# Allow overriding via env: CLANG_PATH
-if(DEFINED ENV{CLANG_PATH})
-  set(CLANG_EXE "$ENV{CLANG_PATH}")
-else()
-  find_program(
-    CLANG_EXE
-    NAMES clang-${LLVM_VERSION_MAJOR} clang
-    HINTS ${LLVM_TOOLS_BINARY_DIR} "${LLVM_DIR}/../../../bin"
-  )
-endif()
-
-if(NOT CLANG_EXE)
-  message(FATAL_ERROR "clang not found. Required to locate liborc_rt library.")
-endif()
-
-execute_process(
-  COMMAND ${CLANG_EXE} -print-runtime-dir
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  OUTPUT_VARIABLE _clang_runtime_dir
-  ERROR_QUIET
-  RESULT_VARIABLE _clang_runtime_dir_rc
-)
-
-cmake_host_system_information(RESULT _host_arch QUERY OS_PLATFORM)
+# Search for liborc_rt under the LLVM prefix (provided by compiler-rt package).
+# No clang binary is needed — we search the lib/clang/*/lib/ tree directly.
 set(ORC_RT_PATH "")
 
-if(_clang_runtime_dir_rc EQUAL 0 AND _clang_runtime_dir)
+if(DEFINED ENV{ORC_RT_PATH})
+  # Allow explicit override via environment variable
+  set(ORC_RT_PATH "$ENV{ORC_RT_PATH}")
+else()
   if(WIN32)
-    # Windows: look for orc_rt*.lib
-    file(GLOB_RECURSE _orc_rt_candidates "${_clang_runtime_dir}/orc_rt*.lib")
+    file(GLOB_RECURSE _orc_rt_candidates "${_llvm_prefix}/lib/clang/*/lib/orc_rt*.lib")
     if(NOT _orc_rt_candidates)
-      cmake_path(GET _clang_runtime_dir PARENT_PATH _clang_runtime_parent)
-      if(EXISTS "${_clang_runtime_parent}")
-        file(GLOB_RECURSE _orc_rt_candidates "${_clang_runtime_parent}/orc_rt*.lib")
-      endif()
-    endif()
-    if(_orc_rt_candidates)
-      list(GET _orc_rt_candidates 0 ORC_RT_PATH)
+      file(GLOB_RECURSE _orc_rt_candidates "${_llvm_prefix}/Library/lib/clang/*/lib/orc_rt*.lib")
     endif()
   else()
-    # Try arch-specific name in the exact directory first
-    if(EXISTS "${_clang_runtime_dir}/liborc_rt-${_host_arch}.a")
-      set(ORC_RT_PATH "${_clang_runtime_dir}/liborc_rt-${_host_arch}.a")
-    elseif(EXISTS "${_clang_runtime_dir}/liborc_rt.a")
-      set(ORC_RT_PATH "${_clang_runtime_dir}/liborc_rt.a")
-    else()
-      # The reported runtime dir may not exist (e.g. clang reports
-      # aarch64-unknown-linux-gnu/ but files live in linux/). Resolve
-      # the parent and search recursively from there.
-      cmake_path(GET _clang_runtime_dir PARENT_PATH _clang_runtime_parent)
-      if(EXISTS "${_clang_runtime_parent}")
-        file(GLOB_RECURSE _orc_rt_candidates "${_clang_runtime_parent}/liborc_rt*.a")
-        if(_orc_rt_candidates)
-          list(GET _orc_rt_candidates 0 ORC_RT_PATH)
-        endif()
-      endif()
-    endif()
+    file(GLOB_RECURSE _orc_rt_candidates "${_llvm_prefix}/lib/clang/*/lib/liborc_rt*.a")
+  endif()
+  if(_orc_rt_candidates)
+    list(GET _orc_rt_candidates 0 ORC_RT_PATH)
   endif()
 endif()
 

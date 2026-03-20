@@ -24,14 +24,16 @@ for i in 1 2 3; do
   sleep 5
 done
 
-# Create environment with LLVM
-# zlib conda package provides a PIC-compiled libz.a suitable for shared libs
+# Install LLVM, clang (for compiling test objects), compiler-rt (for liborc_rt),
+# and zlib (static PIC lib from conda-forge).
 /usr/local/bin/micromamba create -p "${PREFIX}" -c conda-forge \
   "llvmdev=${LLVM_VERSION}" "clangdev=${LLVM_VERSION}" "compiler-rt=${LLVM_VERSION}" \
   zlib \
   -y
 
-# Build libzstd.a from source with PIC (no static package on AlmaLinux 8 or 9)
+# Build static PIC libzstd.a from source.
+# conda-forge's zstd package only ships the shared library, but we need static
+# linking so the wheel is self-contained (no runtime zstd dependency).
 ZSTD_VERSION="1.5.7"
 curl -sL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz" \
   | tar -xz

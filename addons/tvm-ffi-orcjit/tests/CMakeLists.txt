@@ -96,9 +96,17 @@ endif()
 
 # Pure C object files — built on all platforms (no C++ runtime deps)
 enable_language(C)
+
+# Use MSVC-compatible optimization flag on Windows
+if(MSVC)
+  set(_opt_flag /O2)
+else()
+  set(_opt_flag -O2)
+endif()
+
 add_library(test_funcs_c_obj OBJECT sources/test_funcs_c.c)
 target_link_libraries(test_funcs_c_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs_c_obj PRIVATE -O2)
+target_compile_options(test_funcs_c_obj PRIVATE ${_opt_flag})
 install(
   FILES $<TARGET_OBJECTS:test_funcs_c_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
@@ -107,7 +115,7 @@ install(
 
 add_library(test_funcs2_c_obj OBJECT sources/test_funcs2_c.c)
 target_link_libraries(test_funcs2_c_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs2_c_obj PRIVATE -O2)
+target_compile_options(test_funcs2_c_obj PRIVATE ${_opt_flag})
 install(
   FILES $<TARGET_OBJECTS:test_funcs2_c_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
@@ -116,7 +124,7 @@ install(
 
 add_library(test_funcs_conflict_c_obj OBJECT sources/test_funcs_conflict_c.c)
 target_link_libraries(test_funcs_conflict_c_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_funcs_conflict_c_obj PRIVATE -O2)
+target_compile_options(test_funcs_conflict_c_obj PRIVATE ${_opt_flag})
 install(
   FILES $<TARGET_OBJECTS:test_funcs_conflict_c_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
@@ -126,7 +134,7 @@ install(
 # Pure C global function callback test — built on all platforms
 add_library(test_call_global_c_obj OBJECT sources/test_call_global_c.c)
 target_link_libraries(test_call_global_c_obj PRIVATE tvm_ffi::header)
-target_compile_options(test_call_global_c_obj PRIVATE -O2)
+target_compile_options(test_call_global_c_obj PRIVATE ${_opt_flag})
 install(
   FILES $<TARGET_OBJECTS:test_call_global_c_obj>
   DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}

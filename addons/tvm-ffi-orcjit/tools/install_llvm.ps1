@@ -51,15 +51,18 @@ if (-not (Test-Path $MicromambaExe)) {
 }
 Write-Host "Using micromamba: $MicromambaExe"
 
-# Create environment with LLVM
-Write-Host "Creating conda environment with LLVM $Version..."
+# Install LLVM and zlib. No clangdev or compiler-rt on Windows — test objects
+# use C-only strategy compiled with the system compiler (MSVC), and liborc_rt
+# is not used (Windows ORC JIT skips COFFPlatform).
 & $MicromambaExe create -p $Prefix -c conda-forge `
-    "llvmdev=$Version" "clangdev=$Version" "compiler-rt=$Version" `
+    "llvmdev=$Version" `
     zlib `
     -y
 if ($LASTEXITCODE -ne 0) { throw "micromamba create failed" }
 
-# Build libzstd from source with CMake (MSVC static)
+# Build static zstd from source.
+# conda-forge's zstd package only ships the shared library, but we need static
+# linking so the wheel is self-contained (no runtime zstd dependency).
 $ZstdVersion = "1.5.7"
 $ZstdTarball = "$env:TEMP\zstd-$ZstdVersion.tar.gz"
 $ZstdSrc = "$env:TEMP\zstd-$ZstdVersion"
@@ -75,7 +78,7 @@ $ZstdBuild = "$env:TEMP\_zstd_build"
 if (Test-Path $ZstdBuild) { Remove-Item -Recurse -Force $ZstdBuild }
 
 cmake -S "$ZstdSrc\build\cmake" -B $ZstdBuild `
-    -DCMAKE_INSTALL_PREFIX="$Prefix" `
+    -DCMAKE_INSTALL_PREFIX="$Prefix\Library" `
     -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_STATIC=ON `
     -DZSTD_BUILD_PROGRAMS=OFF
 if ($LASTEXITCODE -ne 0) { throw "zstd cmake configure failed" }
