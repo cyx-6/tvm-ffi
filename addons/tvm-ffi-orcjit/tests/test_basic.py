@@ -348,13 +348,9 @@ def test_void_function(v: Variant) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_set_link_order() -> None:
-    """Cross-library symbol resolution via set_link_order (C only).
-
-    C++ cross-library linking has platform-specific issues with ORC JIT
-    on aarch64/macOS, so this test uses C objects only.
-    """
-    v = C
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_set_link_order(v: Variant) -> None:
+    """Cross-library symbol resolution via set_link_order."""
     session = ExecutionSession()
     # Base library exports helper_add
     lib_base = session.create_library("base")

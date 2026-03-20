@@ -87,11 +87,17 @@ void ORCJITDynamicLibraryObj::AddObjectFile(const String& path) {
 }
 
 void ORCJITDynamicLibraryObj::SetLinkOrder(const std::vector<llvm::orc::JITDylib*>& dylibs) {
-  // Clear and rebuild the link order
+  // Rebuild the link order: user-specified libraries first, then the LLJIT
+  // default link order (Main → Platform → ProcessSymbols).  Preserving the
+  // default link order is essential — without ProcessSymbols, C++ objects
+  // that need host-process symbols (runtime, libtvm_ffi) would fail to link.
   link_order_.clear();
 
   for (auto* lib : dylibs) {
     link_order_.emplace_back(lib, llvm::orc::JITDylibLookupFlags::MatchAllSymbols);
+  }
+  for (auto& kv : jit_->defaultLinkOrder()) {
+    link_order_.emplace_back(kv.first, kv.second);
   }
 
   // Set the link order in the LLVM JITDylib
