@@ -94,10 +94,18 @@ class InitFiniPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
             section_name == "__DATA,__mod_term_func" ||
             section_name.starts_with(".CRT$XC") || section_name.starts_with(".CRT$XT")) {
           for (auto* Block : Section.blocks()) {
+            bool has_live_sym = false;
             for (auto* Sym : G.defined_symbols()) {
               if (&Sym->getBlock() == Block) {
                 Sym->setLive(true);
+                has_live_sym = true;
               }
+            }
+            // MSVC may emit .CRT$XC* blocks with data but no symbol table
+            // entries (static variables in __declspec(allocate) sections).
+            // Add an anonymous symbol so the block survives dead-stripping.
+            if (!has_live_sym) {
+              G.addAnonymousSymbol(*Block, 0, Block->getSize(), false, true).setLive(true);
             }
             for (auto& Edge : Block->edges()) {
               Edge.getTarget().setLive(true);

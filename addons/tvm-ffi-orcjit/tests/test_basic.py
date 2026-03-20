@@ -400,8 +400,6 @@ def test_load_and_execute_cuda_function() -> None:
 
 @pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
 def test_ctor_dtor(v: Variant) -> None:
-    if v.subdir.endswith(("-msvc", "-clang-cl")):
-        pytest.xfail("ORC JIT does not run .CRT$XC* initializers (no COFFPlatform)")
     log = ""
 
     @tvm_ffi.register_global_func("append_log", override=True)
@@ -419,6 +417,7 @@ def test_ctor_dtor(v: Variant) -> None:
 
     if v.subdir.endswith(("-msvc", "-clang-cl")):
         # MSVC or clang-cl: COFF .CRT$XC* sections in alphabetical order + atexit
+        assert "<crt.XCA>" in pre, f"CRT initializers not found in log: {log!r}"
         assert pre.index("<crt.XCA>") < pre.index("<crt.XCB>")
         assert pre.index("<crt.XCB>") < pre.index("<crt.XCC>")
         assert pre.index("<crt.XCC>") < pre.index("<crt.XCU>")
