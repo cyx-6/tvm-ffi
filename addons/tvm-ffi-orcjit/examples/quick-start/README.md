@@ -17,57 +17,77 @@
 
 # Quick Start Example
 
-This example demonstrates the basic usage of tvm-ffi-orcjit to compile functions and load them dynamically at runtime. Both C++ and pure C variants are included.
+Demonstrates basic usage of tvm-ffi-orcjit: compile functions to object files,
+load them into the ORC JIT at runtime, and call them from Python.
 
-## What's Included
+## Files
 
-- `add.cc` - C++ source file with math functions exported via `TVM_FFI_DLL_EXPORT_TYPED_FUNC`
-- `add_c.c` - Pure C source file with the same functions exported via `TVMFFISafeCallType` ABI
-- `run.py` - Python script that loads and calls the compiled functions
-- `CMakeLists.txt` - CMake configuration to compile both variants
+| File | Description |
+|------|-------------|
+| `add.cc` | C++ source using `TVM_FFI_DLL_EXPORT_TYPED_FUNC` (automatic type marshaling, supports `std::string`) |
+| `add_c.c` | Pure C source using `TVMFFISafeCallType` ABI (`__tvm_ffi_` prefix). No C++ runtime needed. |
+| `run.py` | Python script that loads and calls the compiled functions |
+| `CMakeLists.txt` | Build configuration for both variants |
 
 ## Prerequisites
 
-- Python 3.8+
-- CMake 3.18+
-- C/C++ compiler (g++, clang++, or MSVC)
-- TVM-FFI and tvm-ffi-orcjit packages
+- Python 3.9+, CMake 3.18+, C/C++ compiler
+- `apache-tvm-ffi` and `tvm-ffi-orcjit` packages installed
 
 ## Steps
 
-### 1. Compile the object files
+### 1. Build the object files
 
 ```bash
 cmake -B build
 cmake --build build
 ```
 
-This produces `add.o` (C++) and `add_c.o` (pure C). On Windows, only the C variant is built.
+This produces `add.o` (C++) and `add_c.o` (pure C). On Windows with the
+default Ninja generator, only the C variant is built (C++ requires Clang).
 
-### 2. Run the Python loader
+### 2. Run
 
 ```bash
-# C++ variant (default) — Linux/macOS only
+# C++ variant (Linux/macOS)
 python run.py
 
-# Pure C variant — works on all platforms including Windows
+# Pure C variant (all platforms including Windows)
 python run.py --lang c
 ```
 
 ## How It Works
 
-### C++ Variant (`add.cc`)
+**C++ variant** (`add.cc`): Functions are exported with
+`TVM_FFI_DLL_EXPORT_TYPED_FUNC`, which wraps a typed C++ lambda/function into
+TVM-FFI's packed calling convention. Supports C++ types like `std::string`.
 
-Functions are exported using the `TVM_FFI_DLL_EXPORT_TYPED_FUNC` macro, which provides automatic type marshaling. Supports `std::string` and other C++ types.
+**C variant** (`add_c.c`): Functions follow the `TVMFFISafeCallType` ABI
+directly — each function is named `__tvm_ffi_<name>` and manually packs
+arguments/results via `TVMFFIAny`. Zero C++ dependencies, works on all
+platforms including Windows with MSVC or clang-cl.
 
-### C Variant (`add_c.c`)
+**Python side** (`run.py`):
 
-Functions are exported using the `TVMFFISafeCallType` ABI directly (`__tvm_ffi_<name>` symbol prefix). No C++ runtime dependencies — works on all platforms including Windows ORC JIT.
+```python
+from tvm_ffi_orcjit import ExecutionSession
 
-### Python Side (`run.py`)
+session = ExecutionSession()       # Create ORC JIT session
+lib = session.create_library()     # Create a JITDylib
+lib.add("add_c.o")                 # Load object file into JIT
+add = lib.get_function("add")      # Look up symbol
+print(add(10, 20))                 # Call like a normal function → 30
+```
 
-- `ExecutionSession()` creates an ORC JIT execution session
-- `session.create_library()` creates a dynamic library (JITDylib)
-- `lib.add()` loads the `.o` file into the JIT
-- `lib.get_function()` looks up symbols in the JIT-compiled code
-- Functions are called like normal Python functions
+## Platform Notes
+
+| Platform | C++ (`add.o`) | C (`add_c.o`) |
+|----------|:---:|:---:|
+| Linux (Clang/GCC) | yes | yes |
+| macOS (Clang/Apple Clang) | yes | yes |
+| Windows (Clang/Ninja) | yes | yes |
+| Windows (MSVC/clang-cl) | no | yes |
+
+MSVC and clang-cl cannot compile C++ TVM-FFI exports because the C++ ABI
+(name mangling, vtable layout) differs from Clang's, and JITLink expects
+Clang-compatible objects. Use the pure C variant on Windows with MSVC/clang-cl.

@@ -17,42 +17,113 @@
 
 # TVM-FFI-OrcJIT Tests
 
-This directory contains tests for the tvm-ffi-orcjit package.
-
 ## Building Test Objects
 
-The tests require pre-built object files. To build them:
+Tests require pre-built object files compiled from `sources/`. The default build
+uses the system C/C++ compiler:
 
 ```bash
 cd tests
-cmake -B build
-cmake --build build --target install
+cmake -B build -DPython_EXECUTABLE=$(which python)
+cmake --build build
+cmake --install build
 ```
 
-This will compile `sources/test_funcs.cc` and generate `test_funcs.o` in the tests directory.
+This installs object files into `c/` and `cc/` subdirectories (e.g. `c/test_funcs.o`).
+
+### Multi-compiler builds
+
+To build objects with an additional compiler, use `TEST_OBJ_INSTALL_SUFFIX` to
+install into a separate subdirectory:
+
+```bash
+# Example: build with GCC as a second variant
+cmake -B build-gcc \
+  -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+  -DTEST_OBJ_INSTALL_SUFFIX=-gcc \
+  -DPython_EXECUTABLE=$(which python)
+cmake --build build-gcc
+cmake --install build-gcc
+```
+
+This installs objects to `c-gcc/` and `cc-gcc/`. The Python test harness
+auto-discovers available variants by checking for `test_funcs.o` in known
+subdirectories.
 
 ## Running Tests
 
-After building the test objects, run the tests with:
-
 ```bash
 pytest tests/ -v
 ```
 
-Or from the repository root:
+## Tested Configurations
 
-```bash
-cd addons/tvm-ffi-orcjit
-pytest tests/ -v
-```
+Tests are parametrized over compiler variants. Each platform builds objects
+with multiple compilers; `test_basic.py` auto-discovers which are available.
+
+| Platform | Variant | Subdir | Compiler | Languages |
+|----------|---------|--------|----------|-----------|
+| All | default | `c/`, `cc/` | LLVM clang | C, C++ |
+| Linux | gcc | `c-gcc/`, `cc-gcc/` | GCC | C, C++ |
+| macOS | appleclang | `c-appleclang/`, `cc-appleclang/` | Apple Clang (`/usr/bin/clang`) | C, C++ |
+| Windows | msvc | `c-msvc/` | MSVC (`cl`) via Visual Studio generator | C only |
+| Windows | clang-cl | `c-clang-cl/` | clang-cl via Visual Studio `-T ClangCL` | C only |
+
+Windows MSVC/clang-cl variants are C-only because MSVC's C++ ABI (name
+mangling, vtable layout, RTTI) differs from Clang's, and the ORC JIT uses
+LLVM's JITLink which expects Clang-compatible objects.
+
+### Platform-specific compiler flags
+
+| Flag | Applies to | Reason |
+|------|-----------|--------|
+| `/O2 /GS-` | MSVC, clang-cl | `/GS-` disables buffer security checks (`__security_cookie`) which are CRT symbols the ORC JIT cannot resolve |
+| `-O2` | All others | Standard optimization |
+| `-mno-outline-atomics` | aarch64 | Avoids libgcc outline atomics helper calls that the JIT cannot resolve |
 
 ## Test Structure
 
-- `sources/` - C++ source files for test functions
-- `test_basic.py` - Python test cases
-- `CMakeLists.txt` - Build configuration for test objects
-- `test_funcs.o` - Generated object file (after building)
+```
+tests/
+  sources/
+    c/          C source files (.c)
+    cc/         C++ source files (.cc)
+    cuda/       CUDA source files (optional)
+  c/            Installed C objects (default compiler)
+  cc/           Installed C++ objects (default compiler)
+  c-gcc/        Installed C objects (GCC variant)
+  cc-gcc/       Installed C++ objects (GCC variant)
+  ...           Other compiler variant directories
+  test_basic.py Python test cases
+  CMakeLists.txt Build configuration for test objects
+```
 
-## CI/CD
+### Source files
 
-The CI workflow automatically builds the test objects before running tests. See `.github/workflows/tvm-ffi-orcjit/ci_test.yml` for the full workflow.
+| Source | Description |
+|--------|-------------|
+| `test_funcs` | Basic arithmetic (add, multiply) |
+| `test_funcs2` | More arithmetic (subtract, divide) |
+| `test_funcs_conflict` | Symbol conflict testing (duplicate `add`) |
+| `test_call_global` | Callbacks into Python-registered global functions |
+| `test_types` | Zero-arg, multi-arg, float, void return types |
+| `test_link_order_base` / `test_link_order_caller` | Cross-library symbol resolution |
+| `test_error` | Error propagation from JIT'd code |
+| `test_ctor_dtor` | Constructor/destructor and init/fini sections |
+
+### Constructor/destructor test coverage
+
+`test_ctor_dtor` verifies that the ORC JIT correctly handles platform-specific
+static initialization and finalization:
+
+| Platform | Init mechanism | Fini mechanism |
+|----------|---------------|----------------|
+| Linux (ELF) | `.init_array` (with priorities), `.ctors` (reversed) | `.dtors` |
+| macOS (Mach-O) | `.init_array` (with priorities), `__mod_init_func` | `.fini_array` (with priorities) |
+| Windows (Clang) | `.init_array` (via `__attribute__((constructor))`) | N/A |
+| Windows (MSVC) | `.CRT$XCA`..`XCU` (alphabetical order) | `.CRT$XTA`..`XTZ` (alphabetical order) |
+
+## CI
+
+The CI workflow (`.github/workflows/orcjit-build.yml`) builds test objects with
+all compiler variants per platform before running pytest via `cibuildwheel`.
