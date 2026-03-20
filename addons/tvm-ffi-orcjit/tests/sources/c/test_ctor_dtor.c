@@ -25,13 +25,11 @@
  * Platform-specific init/deinit mechanisms tested:
  *   ELF   → .init_array/.fini_array (via __attribute__) + .ctors/.dtors
  *   Mach-O → __DATA,__mod_init_func (via __attribute__) + explicit section
- *   COFF  → .CRT$XC* sections + atexit()
+ *   COFF  → .CRT$XC* sections (init) + .CRT$XT* sections (term)
  */
 #include <tvm/ffi/c_api.h>
 
 #ifdef _MSC_VER
-#include <stdlib.h> /* atexit */
-#endif
 
 static void puts_log(const char* msg) {
   TVMFFIByteArray func_name;
@@ -123,6 +121,8 @@ static ctor_t mod_init_ptr = mod_init_func;
 #pragma section(".CRT$XCB", read)
 #pragma section(".CRT$XCC", read)
 #pragma section(".CRT$XCU", read)
+#pragma section(".CRT$XTA", read)
+#pragma section(".CRT$XTZ", read)
 
 static void __cdecl crt_init_a(void) { puts_log("<crt.XCA>"); }
 __declspec(allocate(".CRT$XCA")) ctor_t __tvm_test_crt_init_a = crt_init_a;
@@ -136,9 +136,11 @@ __declspec(allocate(".CRT$XCC")) ctor_t __tvm_test_crt_init_c = crt_init_c;
 static void __cdecl crt_init_u(void) { puts_log("<crt.XCU>"); }
 __declspec(allocate(".CRT$XCU")) ctor_t __tvm_test_crt_init_u = crt_init_u;
 
-static void __cdecl crt_atexit(void) { puts_log("<atexit>"); }
-static void __cdecl crt_register_atexit(void) { atexit(crt_atexit); }
-__declspec(allocate(".CRT$XCU")) ctor_t __tvm_test_crt_atexit_reg = crt_register_atexit;
+static void __cdecl crt_term_a(void) { puts_log("<crt.XTA>"); }
+__declspec(allocate(".CRT$XTA")) dtor_t __tvm_test_crt_term_a = crt_term_a;
+
+static void __cdecl crt_term_z(void) { puts_log("<crt.XTZ>"); }
+__declspec(allocate(".CRT$XTZ")) dtor_t __tvm_test_crt_term_z = crt_term_z;
 
 #endif /* _MSC_VER */
 
