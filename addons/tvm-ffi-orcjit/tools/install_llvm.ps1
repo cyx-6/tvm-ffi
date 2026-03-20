@@ -25,6 +25,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 if (-not $Version) {
     $Version = if ($env:LLVM_VERSION) { $env:LLVM_VERSION } else { "22.1.0" }
