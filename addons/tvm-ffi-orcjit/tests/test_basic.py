@@ -93,6 +93,9 @@ class Variant:
     def error_obj(self):
         return f"{self.subdir}/test_error"
 
+    def ctor_dtor_obj(self):
+        return f"{self.subdir}/test_ctor_dtor"
+
     def fn(self, base_name: str) -> str:
         return base_name
 
@@ -385,21 +388,22 @@ def test_load_and_execute_cuda_function() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Constructor / destructor (C++ only, Linux/macOS)
+# Constructor / destructor (Linux/macOS, parametrized over C / C++)
 # ---------------------------------------------------------------------------
 
 
 @skip_on_windows
-def test_ctor_dtor() -> None:
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_ctor_dtor(v: Variant) -> None:
     log = ""
 
-    @tvm_ffi.register_global_func("append_log")
+    @tvm_ffi.register_global_func("append_log", override=True)
     def _append_ctor_log(x: str) -> None:
         nonlocal log
         log += x
 
-    _, lib = make_lib("cc/test_ctor_dtor")
-    lib.get_function("main")()
+    _, lib = make_lib(v.ctor_dtor_obj())
+    lib.get_function(v.fn("main"))()
     del lib
 
     if sys.platform == "linux":
@@ -425,7 +429,3 @@ def test_ctor_dtor() -> None:
         assert post.index("<fini_array.102>") < post.index("<fini_array.101>")
         assert "<ctors>" not in log
         assert "<dtors>" not in log
-
-
-if __name__ == "__main__":
-    test_ctor_dtor()
