@@ -415,12 +415,8 @@ def test_ctor_dtor(v: Variant) -> None:
     pre = log[:main_idx]
     post = log[main_idx:]
 
-    if v.subdir.endswith("-clang-cl"):
-        # clang-cl: JITLink COFF parser can't resolve symbol indices for
-        # __declspec(allocate) sections produced by clang-cl.
-        pytest.xfail("JITLink COFF limitation with clang-cl __declspec(allocate)")
-    elif v.subdir.endswith("-msvc"):
-        # MSVC: COFF .CRT$XC* constructors + .CRT$XT* terminators
+    if v.subdir.endswith(("-msvc", "-clang-cl")):
+        # MSVC/clang-cl: COFF .CRT$XC* constructors + .CRT$XT* terminators
         assert "<crt.XCA>" in pre, f"CRT initializers not found in log: {log!r}"
         assert pre.index("<crt.XCA>") < pre.index("<crt.XCB>")
         assert pre.index("<crt.XCB>") < pre.index("<crt.XCC>")

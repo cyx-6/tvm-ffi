@@ -31,6 +31,7 @@
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/Shared/ExecutorAddress.h>
 #include <llvm/ExecutionEngine/Orc/Shared/ExecutorSymbolDef.h>
+#include <llvm/Object/COFF.h>
 #include <llvm/Support/DynamicLibrary.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
@@ -41,6 +42,7 @@
 #include <tvm/ffi/reflection/registry.h>
 
 #include <cstddef>
+#include <cstring>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -459,6 +461,61 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
     setup_builder(builder);
     jit_ = std::move(call_llvm(builder.create(), "Failed to create LLJIT"));
   }
+#ifdef _WIN32
+  // Strip .pdata/.xdata relocations from COFF objects before JITLink graph building.
+  // clang-cl puts static functions in COMDAT sections, and .pdata SEH unwind data
+  // has relocations targeting COMDAT leader symbols. JITLink's COFFLinkGraphBuilder
+  // doesn't register COMDAT leaders in its symbol table when the second COMDAT symbol
+  // is CLASS_STATIC (not CLASS_EXTERNAL), causing "Could not find symbol" errors.
+  // We already strip .pdata/.xdata edges in a PostAllocationPass; this moves the
+  // stripping earlier to prevent the graph builder error.
+  jit_->getObjTransformLayer().setTransform(
+      [](std::unique_ptr<llvm::MemoryBuffer> Buf)
+          -> llvm::Expected<std::unique_ptr<llvm::MemoryBuffer>> {
+        auto ObjOrErr =
+            llvm::object::ObjectFile::createCOFFObjectFile(Buf->getMemBufferRef());
+        if (!ObjOrErr) {
+          llvm::consumeError(ObjOrErr.takeError());
+          return std::move(Buf);
+        }
+        auto& COFF = **ObjOrErr;
+        // Check if any .pdata/.xdata sections have relocations
+        bool needs_strip = false;
+        for (const auto& Sec : COFF.sections()) {
+          auto NameOrErr = Sec.getName();
+          if (!NameOrErr) continue;
+          if ((NameOrErr->starts_with(".pdata") || NameOrErr->starts_with(".xdata")) &&
+              Sec.relocations().begin() != Sec.relocations().end()) {
+            needs_strip = true;
+            break;
+          }
+        }
+        if (!needs_strip) return std::move(Buf);
+        // Create a mutable copy and zero out relocation fields in section headers
+        llvm::SmallVector<char> MutableBuf(Buf->getBufferStart(), Buf->getBufferEnd());
+        for (const auto& Sec : COFF.sections()) {
+          auto NameOrErr = Sec.getName();
+          if (!NameOrErr) continue;
+          if (NameOrErr->starts_with(".pdata") || NameOrErr->starts_with(".xdata")) {
+            const auto* COFFSec = COFF.getCOFFSection(Sec);
+            if (COFFSec->NumberOfRelocations > 0) {
+              ptrdiff_t Off =
+                  reinterpret_cast<const char*>(COFFSec) - Buf->getBufferStart();
+              // Zero PointerToRelocations (offset 24) and NumberOfRelocations (offset 32)
+              std::memset(&MutableBuf[Off + offsetof(llvm::object::coff_section,
+                                                     PointerToRelocations)],
+                          0, 4);
+              std::memset(&MutableBuf[Off + offsetof(llvm::object::coff_section,
+                                                     NumberOfRelocations)],
+                          0, 2);
+            }
+          }
+        }
+        return llvm::MemoryBuffer::getMemBufferCopy(
+            llvm::StringRef(MutableBuf.data(), MutableBuf.size()),
+            Buf->getBufferIdentifier());
+      });
+#endif
 #if defined(__linux__) || defined(_WIN32)
   // Linux/Windows: use our custom InitFiniPlugin for init/fini section collection
   // and priority-ordered execution.
