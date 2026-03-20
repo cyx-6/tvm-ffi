@@ -31,7 +31,6 @@
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/Shared/ExecutorAddress.h>
 #include <llvm/ExecutionEngine/Orc/Shared/ExecutorSymbolDef.h>
-#include <llvm/Object/COFF.h>
 #include <llvm/Support/DynamicLibrary.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
@@ -469,47 +468,89 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
   // is CLASS_STATIC (not CLASS_EXTERNAL), causing "Could not find symbol" errors.
   // We already strip .pdata/.xdata edges in a PostAllocationPass; this moves the
   // stripping earlier to prevent the graph builder error.
+  // Strip .pdata/.xdata relocations using raw COFF binary manipulation.
+  // We avoid llvm/Object/COFF.h because windows.h (included transitively by
+  // LLJIT.h) defines IMAGE_* macros that conflict with LLVM's COFF enums.
   jit_->getObjTransformLayer().setTransform(
       [](std::unique_ptr<llvm::MemoryBuffer> Buf)
           -> llvm::Expected<std::unique_ptr<llvm::MemoryBuffer>> {
-        auto ObjOrErr =
-            llvm::object::ObjectFile::createCOFFObjectFile(Buf->getMemBufferRef());
-        if (!ObjOrErr) {
-          llvm::consumeError(ObjOrErr.takeError());
-          return std::move(Buf);
+        const char* Data = Buf->getBufferStart();
+        size_t Size = Buf->getBufferSize();
+        if (Size < 20) return std::move(Buf);
+
+        // Parse COFF header (regular or bigobj format)
+        uint16_t w0, w1;
+        std::memcpy(&w0, Data, 2);
+        std::memcpy(&w1, Data + 2, 2);
+        bool bigobj = (w0 == 0 && w1 == 0xFFFF);
+
+        uint16_t machine;
+        uint32_t num_sections, ptr_to_symtab, num_symbols;
+        size_t sec_hdr_start, sym_entry_size;
+        if (bigobj) {
+          if (Size < 56) return std::move(Buf);
+          std::memcpy(&machine, Data + 6, 2);
+          std::memcpy(&num_sections, Data + 44, 4);
+          std::memcpy(&ptr_to_symtab, Data + 48, 4);
+          std::memcpy(&num_symbols, Data + 52, 4);
+          sec_hdr_start = 56;
+          sym_entry_size = 20;
+        } else {
+          machine = w0;
+          uint16_t ns, opt_hdr_size;
+          std::memcpy(&ns, Data + 2, 2);
+          std::memcpy(&opt_hdr_size, Data + 16, 2);
+          std::memcpy(&ptr_to_symtab, Data + 8, 4);
+          std::memcpy(&num_symbols, Data + 12, 4);
+          num_sections = ns;
+          sec_hdr_start = 20 + opt_hdr_size;
+          sym_entry_size = 18;
         }
-        auto& COFF = **ObjOrErr;
-        // Check if any .pdata/.xdata sections have relocations
-        bool needs_strip = false;
-        for (const auto& Sec : COFF.sections()) {
-          auto NameOrErr = Sec.getName();
-          if (!NameOrErr) continue;
-          if ((NameOrErr->starts_with(".pdata") || NameOrErr->starts_with(".xdata")) &&
-              Sec.relocations().begin() != Sec.relocations().end()) {
-            needs_strip = true;
-            break;
-          }
-        }
-        if (!needs_strip) return std::move(Buf);
-        // Create a mutable copy and zero out relocation fields in section headers
-        llvm::SmallVector<char> MutableBuf(Buf->getBufferStart(), Buf->getBufferEnd());
-        for (const auto& Sec : COFF.sections()) {
-          auto NameOrErr = Sec.getName();
-          if (!NameOrErr) continue;
-          if (NameOrErr->starts_with(".pdata") || NameOrErr->starts_with(".xdata")) {
-            const auto* COFFSec = COFF.getCOFFSection(Sec);
-            if (COFFSec->NumberOfRelocations > 0) {
-              ptrdiff_t Off =
-                  reinterpret_cast<const char*>(COFFSec) - Buf->getBufferStart();
-              // Zero PointerToRelocations (offset 24) and NumberOfRelocations (offset 32)
-              std::memset(&MutableBuf[Off + offsetof(llvm::object::coff_section,
-                                                     PointerToRelocations)],
-                          0, 4);
-              std::memset(&MutableBuf[Off + offsetof(llvm::object::coff_section,
-                                                     NumberOfRelocations)],
-                          0, 2);
+        if (machine != 0x8664) return std::move(Buf);
+
+        // String table follows the symbol table
+        size_t strtab_start =
+            ptr_to_symtab + static_cast<size_t>(num_symbols) * sym_entry_size;
+
+        // Resolve a section name (inline 8-byte or "/offset" string table ref)
+        constexpr size_t kSecHdrSize = 40;
+        auto resolve_name = [&](size_t hdr_off) -> llvm::StringRef {
+          const char* raw = Data + hdr_off;
+          if (raw[0] == '/' && raw[1] >= '0' && raw[1] <= '9') {
+            uint32_t offset = 0;
+            for (int j = 1; j < 8 && raw[j] >= '0' && raw[j] <= '9'; ++j)
+              offset = offset * 10 + (raw[j] - '0');
+            size_t pos = strtab_start + offset;
+            if (pos < Size) {
+              size_t len = 0;
+              while (pos + len < Size && Data[pos + len]) ++len;
+              return {Data + pos, len};
             }
           }
+          size_t len = 0;
+          while (len < 8 && raw[len]) ++len;
+          return {raw, len};
+        };
+
+        // Collect section header offsets needing relocation stripping
+        llvm::SmallVector<size_t, 8> strip_offsets;
+        for (uint32_t i = 0; i < num_sections; ++i) {
+          size_t off = sec_hdr_start + i * kSecHdrSize;
+          if (off + kSecHdrSize > Size) break;
+          auto name = resolve_name(off);
+          if (name.starts_with(".pdata") || name.starts_with(".xdata")) {
+            uint16_t num_relocs;
+            std::memcpy(&num_relocs, Data + off + 32, 2);
+            if (num_relocs > 0) strip_offsets.push_back(off);
+          }
+        }
+        if (strip_offsets.empty()) return std::move(Buf);
+
+        // Create mutable copy, zero out PointerToRelocations and NumberOfRelocations
+        llvm::SmallVector<char> MutableBuf(Data, Data + Size);
+        for (auto off : strip_offsets) {
+          std::memset(&MutableBuf[off + 24], 0, 4);  // PointerToRelocations
+          std::memset(&MutableBuf[off + 32], 0, 2);  // NumberOfRelocations
         }
         return llvm::MemoryBuffer::getMemBufferCopy(
             llvm::StringRef(MutableBuf.data(), MutableBuf.size()),
