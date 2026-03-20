@@ -25,390 +25,203 @@ import pytest
 import tvm_ffi
 from tvm_ffi_orcjit import ExecutionSession
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+TEST_DIR = Path(__file__).parent
+
 skip_on_windows = pytest.mark.skipif(
     sys.platform == "win32",
     reason="C++ object files not built on Windows (C-only strategy)",
 )
 
 
-def get_test_obj_file(object_file: str) -> Path:
-    """Get the path to the pre-built test object file.
+def obj(name: str) -> str:
+    """Return path to a pre-built test object file, or skip if missing."""
+    path = TEST_DIR / f"{name}.o"
+    if not path.exists():
+        pytest.skip(f"{path.name} not found (not built)")
+    return str(path)
 
-    Returns
-    -------
-    Path
-        Path to the test_funcs.o object file.
 
-    """
-    # The object file should be built by CMake and located in the tests directory
-    test_dir = Path(__file__).parent
-    obj_file = test_dir / object_file
+def make_lib(*obj_names: str, session: ExecutionSession | None = None, name: str = ""):
+    """Create a library and load one or more object files into it."""
+    if session is None:
+        session = ExecutionSession()
+    lib = session.create_library(name)
+    for o in obj_names:
+        lib.add(obj(o))
+    return session, lib
 
-    if not obj_file.exists():
-        raise FileNotFoundError(
-            f"Test object file not found: {obj_file}\n"
-            "Please build the test object file first:\n"
-            "  cd tests && cmake -B build && cmake --build build"
-        )
 
-    return obj_file
+# ---------------------------------------------------------------------------
+# Variants: C uses "_c" suffix on object files and function names;
+# C++ uses no suffix.  Tests are parametrized over both variants where the
+# logic is identical.
+# ---------------------------------------------------------------------------
+
+
+class Variant:
+    """Describes a C or C++ test variant (object file / function name mapping)."""
+
+    def __init__(self, suffix: str):
+        self.suffix = suffix  # "" for C++, "_c" for C
+
+    def funcs_obj(self):
+        return f"test_funcs{self.suffix}"
+
+    def funcs2_obj(self):
+        return f"test_funcs2{self.suffix}"
+
+    def conflict_obj(self):
+        return f"test_funcs_conflict{self.suffix}"
+
+    def call_global_obj(self):
+        return f"test_call_global{self.suffix}"
+
+    def fn(self, base_name: str) -> str:
+        return f"{base_name}{self.suffix}"
+
+    def __repr__(self) -> str:
+        return "C" if self.suffix else "C++"
+
+
+CPP = Variant("")
+C = Variant("_c")
+
+# On Windows, only C variant is available
+_all_variants = [CPP, C] if sys.platform != "win32" else [C]
+_cpp_only = [CPP] if sys.platform != "win32" else []
+
+
+def _variant_id(v: Variant) -> str:
+    return repr(v)
+
+
+# ---------------------------------------------------------------------------
+# Session / library creation
+# ---------------------------------------------------------------------------
 
 
 def test_create_session() -> None:
-    """Test creating an execution session."""
     session = ExecutionSession()
     assert session is not None
 
 
 def test_create_library() -> None:
-    """Test creating a dynamic library."""
     session = ExecutionSession()
     lib = session.create_library()
     assert lib is not None
 
 
-def test_load_and_execute_c_function() -> None:
-    """Test loading a pure C object file and executing a function.
-
-    Uses the TVMFFISafeCallType C ABI directly, with no C++ runtime
-    dependencies. This isolates JIT infrastructure from MSVC CRT issues.
-    """
-    obj_file = get_test_obj_file("test_funcs_c.o")
-
-    session = ExecutionSession()
-    lib = session.create_library()
-    lib.add(str(obj_file))
-
-    add_func = lib.get_function("test_add_c")
-    result = add_func(10, 20)
-    assert result == 30
-
-    mul_func = lib.get_function("test_multiply_c")
-    result = mul_func(7, 6)
-    assert result == 42
-
-
-def test_load_and_execute_c_function2() -> None:
-    """Test loading C object file with subtract and divide functions."""
-    obj_file = get_test_obj_file("test_funcs2_c.o")
-
-    session = ExecutionSession()
-    lib = session.create_library()
-    lib.add(str(obj_file))
-
-    sub_func = lib.get_function("test_subtract_c")
-    assert sub_func(10, 3) == 7
-
-    div_func = lib.get_function("test_divide_c")
-    assert div_func(20, 4) == 5
-
-
-def test_gradually_add_c_objects_to_same_library() -> None:
-    """Test gradually adding multiple C object files to the same library."""
-    obj_file1 = get_test_obj_file("test_funcs_c.o")
-    obj_file2 = get_test_obj_file("test_funcs2_c.o")
-
-    session = ExecutionSession()
-    lib = session.create_library()
-
-    # Add first object file
-    lib.add(str(obj_file1))
-
-    # Test functions from first object
-    add_func = lib.get_function("test_add_c")
-    assert add_func(5, 3) == 8
-
-    mul_func = lib.get_function("test_multiply_c")
-    assert mul_func(4, 5) == 20
-
-    # Add second object file to the same library
-    lib.add(str(obj_file2))
-
-    # Test functions from second object
-    sub_func = lib.get_function("test_subtract_c")
-    assert sub_func(10, 3) == 7
-
-    div_func = lib.get_function("test_divide_c")
-    assert div_func(20, 4) == 5
-
-    # Verify first object's functions still work
-    assert add_func(10, 20) == 30
-    assert mul_func(7, 6) == 42
-
-
-def test_two_separate_c_libraries() -> None:
-    """Test creating two separate libraries each with its own C object file."""
-    obj_file1 = get_test_obj_file("test_funcs_c.o")
-    obj_file2 = get_test_obj_file("test_funcs2_c.o")
-
-    session = ExecutionSession()
-
-    # Create first library with first object
-    lib1 = session.create_library("lib1")
-    lib1.add(str(obj_file1))
-
-    # Create second library with second object
-    lib2 = session.create_library("lib2")
-    lib2.add(str(obj_file2))
-
-    # Test functions from lib1
-    add_func = lib1.get_function("test_add_c")
-    assert add_func(5, 3) == 8
-
-    mul_func = lib1.get_function("test_multiply_c")
-    assert mul_func(4, 5) == 20
-
-    # Test functions from lib2
-    sub_func = lib2.get_function("test_subtract_c")
-    assert sub_func(10, 3) == 7
-
-    div_func = lib2.get_function("test_divide_c")
-    assert div_func(20, 4) == 5
-
-    # Verify lib1 doesn't have lib2's functions
-    with pytest.raises(AttributeError, match="Module has no function"):
-        lib1.get_function("test_subtract_c")
-
-    # Verify lib2 doesn't have lib1's functions
-    with pytest.raises(AttributeError, match="Module has no function"):
-        lib2.get_function("test_add_c")
-
-
-def test_c_symbol_conflict_same_library() -> None:
-    """Test that adding C objects with conflicting symbols to same library fails."""
-    obj_file1 = get_test_obj_file("test_funcs_c.o")
-    obj_file_conflict = get_test_obj_file("test_funcs_conflict_c.o")
-
-    session = ExecutionSession()
-    lib = session.create_library()
-
-    # Add first object file
-    lib.add(str(obj_file1))
-
-    # Verify first object's function works
-    add_func = lib.get_function("test_add_c")
-    assert add_func(10, 20) == 30
-
-    # Try to add conflicting object - should raise an error
-    with pytest.raises(Exception):  # LLVM will throw an error for duplicate symbols
-        lib.add(str(obj_file_conflict))
-
-
-def test_c_symbol_conflict_different_libraries() -> None:
-    """Test that adding C objects with conflicting symbols to different libraries works."""
-    obj_file1 = get_test_obj_file("test_funcs_c.o")
-    obj_file_conflict = get_test_obj_file("test_funcs_conflict_c.o")
-
-    session = ExecutionSession()
-
-    # Create first library with first object
-    lib1 = session.create_library("lib1")
-    lib1.add(str(obj_file1))
-
-    # Create second library with conflicting object
-    lib2 = session.create_library("lib2")
-    lib2.add(str(obj_file_conflict))
-
-    # Test that both libraries work with their own versions
-    add_func1 = lib1.get_function("test_add_c")
-    result1 = add_func1(10, 20)
-    assert result1 == 30  # Original implementation
-
-    add_func2 = lib2.get_function("test_add_c")
-    result2 = add_func2(10, 20)
-    assert result2 == 1030  # Conflicting implementation adds 1000
-
-    # Test multiply functions
-    mul_func1 = lib1.get_function("test_multiply_c")
-    assert mul_func1(5, 6) == 30  # Original: 5 * 6
-
-    mul_func2 = lib2.get_function("test_multiply_c")
-    assert mul_func2(5, 6) == 60  # Conflict: (5 * 6) * 2
-
-
-@skip_on_windows
-def test_load_and_execute_function() -> None:
-    """Test loading an object file and executing a function."""
-    # Get pre-built test object file
-    obj_file = get_test_obj_file("test_funcs.o")
-
-    # Create session and library
-    session = ExecutionSession()
-    lib = session.create_library()
-
-    # Load object file
-    lib.add(str(obj_file))
-
-    # Get and call test_add function
-    add_func = lib.get_function("test_add")
-    result = add_func(10, 20)
-    assert result == 30
-
-    # Get and call test_multiply function
-    mul_func = lib.get_function("test_multiply")
-    result = mul_func(7, 6)
-    assert result == 42
-
-
 def test_multiple_libraries() -> None:
-    """Test creating and using multiple libraries."""
     session = ExecutionSession()
-
     lib1 = session.create_library("lib1")
     lib2 = session.create_library("lib2")
-
     assert lib1 is not None
     assert lib2 is not None
 
 
-def test_function_not_found() -> None:
-    """Test that getting a non-existent function raises an error."""
-    if sys.platform == "win32":
-        obj_file = get_test_obj_file("test_funcs_c.o")
-    else:
-        obj_file = get_test_obj_file("test_funcs.o")
+# ---------------------------------------------------------------------------
+# Load & execute — parametrized over C / C++
+# ---------------------------------------------------------------------------
 
-    session = ExecutionSession()
-    lib = session.create_library()
-    lib.add(str(obj_file))
 
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_load_and_execute(v: Variant) -> None:
+    _, lib = make_lib(v.funcs_obj())
+    assert lib.get_function(v.fn("test_add"))(10, 20) == 30
+    assert lib.get_function(v.fn("test_multiply"))(7, 6) == 42
+
+
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_load_and_execute_second_set(v: Variant) -> None:
+    _, lib = make_lib(v.funcs2_obj())
+    assert lib.get_function(v.fn("test_subtract"))(10, 3) == 7
+    assert lib.get_function(v.fn("test_divide"))(20, 4) == 5
+
+
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_function_not_found(v: Variant) -> None:
+    _, lib = make_lib(v.funcs_obj())
     with pytest.raises(AttributeError, match="Module has no function"):
         lib.get_function("nonexistent_function")
 
 
-@skip_on_windows
-def test_gradually_add_objects_to_same_library() -> None:
-    """Test gradually adding multiple object files to the same library."""
-    obj_file1 = get_test_obj_file("test_funcs.o")
-    obj_file2 = get_test_obj_file("test_funcs2.o")
+# ---------------------------------------------------------------------------
+# Multi-object / multi-library — parametrized over C / C++
+# ---------------------------------------------------------------------------
 
-    session = ExecutionSession()
-    lib = session.create_library()
 
-    # Add first object file
-    lib.add(str(obj_file1))
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_gradually_add_objects(v: Variant) -> None:
+    session, lib = make_lib(v.funcs_obj())
 
-    # Test functions from first object
-    add_func = lib.get_function("test_add")
+    add_func = lib.get_function(v.fn("test_add"))
+    mul_func = lib.get_function(v.fn("test_multiply"))
     assert add_func(5, 3) == 8
-
-    mul_func = lib.get_function("test_multiply")
     assert mul_func(4, 5) == 20
 
-    # Add second object file to the same library
-    lib.add(str(obj_file2))
+    lib.add(obj(v.funcs2_obj()))
+    assert lib.get_function(v.fn("test_subtract"))(10, 3) == 7
+    assert lib.get_function(v.fn("test_divide"))(20, 4) == 5
 
-    # Test functions from second object
-    sub_func = lib.get_function("test_subtract")
-    assert sub_func(10, 3) == 7
-
-    div_func = lib.get_function("test_divide")
-    assert div_func(20, 4) == 5
-
-    # Verify first object's functions still work
+    # First object's functions still work
     assert add_func(10, 20) == 30
     assert mul_func(7, 6) == 42
 
 
-@skip_on_windows
-def test_two_separate_libraries() -> None:
-    """Test creating two separate libraries each with its own object file."""
-    obj_file1 = get_test_obj_file("test_funcs.o")
-    obj_file2 = get_test_obj_file("test_funcs2.o")
-
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_two_separate_libraries(v: Variant) -> None:
     session = ExecutionSession()
+    _, lib1 = make_lib(v.funcs_obj(), session=session, name="lib1")
+    _, lib2 = make_lib(v.funcs2_obj(), session=session, name="lib2")
 
-    # Create first library with first object
-    lib1 = session.create_library("lib1")
-    lib1.add(str(obj_file1))
+    assert lib1.get_function(v.fn("test_add"))(5, 3) == 8
+    assert lib1.get_function(v.fn("test_multiply"))(4, 5) == 20
+    assert lib2.get_function(v.fn("test_subtract"))(10, 3) == 7
+    assert lib2.get_function(v.fn("test_divide"))(20, 4) == 5
 
-    # Create second library with second object
-    lib2 = session.create_library("lib2")
-    lib2.add(str(obj_file2))
-
-    # Test functions from lib1
-    add_func = lib1.get_function("test_add")
-    assert add_func(5, 3) == 8
-
-    mul_func = lib1.get_function("test_multiply")
-    assert mul_func(4, 5) == 20
-
-    # Test functions from lib2
-    sub_func = lib2.get_function("test_subtract")
-    assert sub_func(10, 3) == 7
-
-    div_func = lib2.get_function("test_divide")
-    assert div_func(20, 4) == 5
-
-    # Verify lib1 doesn't have lib2's functions
     with pytest.raises(AttributeError, match="Module has no function"):
-        lib1.get_function("test_subtract")
-
-    # Verify lib2 doesn't have lib1's functions
+        lib1.get_function(v.fn("test_subtract"))
     with pytest.raises(AttributeError, match="Module has no function"):
-        lib2.get_function("test_add")
+        lib2.get_function(v.fn("test_add"))
 
 
-@skip_on_windows
-def test_symbol_conflict_same_library() -> None:
-    """Test that adding objects with conflicting symbols to same library fails."""
-    obj_file1 = get_test_obj_file("test_funcs.o")
-    obj_file_conflict = get_test_obj_file("test_funcs_conflict.o")
+# ---------------------------------------------------------------------------
+# Symbol conflicts — parametrized over C / C++
+# ---------------------------------------------------------------------------
 
+
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_symbol_conflict_same_library(v: Variant) -> None:
+    _, lib = make_lib(v.funcs_obj())
+    assert lib.get_function(v.fn("test_add"))(10, 20) == 30
+    with pytest.raises(Exception):
+        lib.add(obj(v.conflict_obj()))
+
+
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_symbol_conflict_different_libraries(v: Variant) -> None:
     session = ExecutionSession()
-    lib = session.create_library()
+    _, lib1 = make_lib(v.funcs_obj(), session=session, name="lib1")
+    _, lib2 = make_lib(v.conflict_obj(), session=session, name="lib2")
 
-    # Add first object file
-    lib.add(str(obj_file1))
-
-    # Verify first object's function works
-    add_func = lib.get_function("test_add")
-    assert add_func(10, 20) == 30
-
-    # Try to add conflicting object - should raise an error
-    with pytest.raises(Exception):  # LLVM will throw an error for duplicate symbols
-        lib.add(str(obj_file_conflict))
+    assert lib1.get_function(v.fn("test_add"))(10, 20) == 30
+    assert lib2.get_function(v.fn("test_add"))(10, 20) == 1030
+    assert lib1.get_function(v.fn("test_multiply"))(5, 6) == 30
+    assert lib2.get_function(v.fn("test_multiply"))(5, 6) == 60
 
 
-@skip_on_windows
-def test_symbol_conflict_different_libraries() -> None:
-    """Test that adding objects with conflicting symbols to different libraries works."""
-    obj_file1 = get_test_obj_file("test_funcs.o")
-    obj_file_conflict = get_test_obj_file("test_funcs_conflict.o")
-
-    session = ExecutionSession()
-
-    # Create first library with first object
-    lib1 = session.create_library("lib1")
-    lib1.add(str(obj_file1))
-
-    # Create second library with conflicting object
-    lib2 = session.create_library("lib2")
-    lib2.add(str(obj_file_conflict))
-
-    # Test that both libraries work with their own versions
-    add_func1 = lib1.get_function("test_add")
-    result1 = add_func1(10, 20)
-    assert result1 == 30  # Original implementation
-
-    add_func2 = lib2.get_function("test_add")
-    result2 = add_func2(10, 20)
-    assert result2 == 1030  # Conflicting implementation adds 1000
-
-    # Test multiply functions
-    mul_func1 = lib1.get_function("test_multiply")
-    assert mul_func1(5, 6) == 30  # Original: 5 * 6
-
-    mul_func2 = lib2.get_function("test_multiply")
-    assert mul_func2(5, 6) == 60  # Conflict: (5 * 6) * 2
+# ---------------------------------------------------------------------------
+# Global function callbacks — parametrized over C / C++
+# ---------------------------------------------------------------------------
 
 
-def test_call_global_from_c() -> None:
-    """Test JIT C code calling a host-registered global function by name.
-
-    Registers Python functions as TVM FFI globals, then loads a C object
-    that looks them up via TVMFFIFunctionGetGlobal and calls them.
-    """
+@pytest.fixture()
+def _register_host_functions():
+    """Register host add/multiply functions for JIT code to call."""
 
     @tvm_ffi.register_global_func("test_host_add", override=True)
     def _host_add(a: int, b: int) -> int:
@@ -418,85 +231,38 @@ def test_call_global_from_c() -> None:
     def _host_mul(a: int, b: int) -> int:
         return a * b
 
-    obj_file = get_test_obj_file("test_call_global_c.o")
 
-    session = ExecutionSession()
-    lib = session.create_library()
-    lib.add(str(obj_file))
-
-    # JIT C code looks up "test_host_add" and calls it
-    add_func = lib.get_function("test_call_global_add_c")
+@pytest.mark.usefixtures("_register_host_functions")
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_call_global(v: Variant) -> None:
+    _, lib = make_lib(v.call_global_obj())
+    add_func = lib.get_function(v.fn("test_call_global_add"))
     assert add_func(10, 20) == 30
     assert add_func(100, 200) == 300
 
-    # JIT C code looks up "test_host_multiply" and calls it
-    mul_func = lib.get_function("test_call_global_mul_c")
+    mul_func = lib.get_function(v.fn("test_call_global_mul"))
     assert mul_func(7, 6) == 42
     assert mul_func(11, 11) == 121
 
 
-@skip_on_windows
-def test_call_global_from_cpp() -> None:
-    """Test JIT C++ code calling a host-registered global function by name.
-
-    Registers Python functions as TVM FFI globals, then loads a C++ object
-    that looks them up via Function::GetGlobalRequired and calls them.
-    """
-
-    @tvm_ffi.register_global_func("test_host_add", override=True)
-    def _host_add(a: int, b: int) -> int:
-        return a + b
-
-    @tvm_ffi.register_global_func("test_host_multiply", override=True)
-    def _host_mul(a: int, b: int) -> int:
-        return a * b
-
-    obj_file = get_test_obj_file("test_call_global.o")
-
-    session = ExecutionSession()
-    lib = session.create_library()
-    lib.add(str(obj_file))
-
-    # JIT C++ code looks up "test_host_add" and calls it
-    add_func = lib.get_function("test_call_global_add")
-    assert add_func(10, 20) == 30
-    assert add_func(100, 200) == 300
-
-    # JIT C++ code looks up "test_host_multiply" and calls it
-    mul_func = lib.get_function("test_call_global_mul")
-    assert mul_func(7, 6) == 42
-    assert mul_func(11, 11) == 121
+# ---------------------------------------------------------------------------
+# CUDA (optional)
+# ---------------------------------------------------------------------------
 
 
 def test_load_and_execute_cuda_function() -> None:
-    """Test loading an object file and executing a function."""
-    # Get pre-built test object file
-    try:
-        obj_file = get_test_obj_file("test_funcs_cuda.o")
-    except FileNotFoundError:
-        return
+    _, lib = make_lib("test_funcs_cuda")
+    assert lib.get_function("test_add")(10, 20) == 30
+    assert lib.get_function("test_multiply")(7, 6) == 42
 
-    # Create session and library
-    session = ExecutionSession()
-    lib = session.create_library()
 
-    # Load object file
-    lib.add(str(obj_file))
-
-    # Get and call test_add function
-    add_func = lib.get_function("test_add")
-    result = add_func(10, 20)
-    assert result == 30
-
-    # Get and call test_multiply function
-    mul_func = lib.get_function("test_multiply")
-    result = mul_func(7, 6)
-    assert result == 42
+# ---------------------------------------------------------------------------
+# Constructor / destructor (C++ only, Linux/macOS)
+# ---------------------------------------------------------------------------
 
 
 @skip_on_windows
 def test_ctor_dtor() -> None:
-    """Test ctor and dtor when loading an object file."""
     log = ""
 
     @tvm_ffi.register_global_func("append_log")
@@ -504,54 +270,31 @@ def test_ctor_dtor() -> None:
         nonlocal log
         log += x
 
-    # Get pre-built test object file
-    obj_file = get_test_obj_file("test_ctor_dtor.o")
-
-    # Create session and library
-    session = ExecutionSession()
-    lib = session.create_library()
-
-    # Load object file
-    lib.add(str(obj_file))
-
+    _, lib = make_lib("test_ctor_dtor")
     lib.get_function("main")()
     del lib
 
     if sys.platform == "linux":
-        # ELF: constructors via .init_array + .ctors, destructors via .dtors.
-        # __attribute__((destructor)) may be lowered to __cxa_atexit (arch-dependent),
-        # so .fini_array entries may or may not be present.
         main_idx = log.index("<main>")
         pre = log[:main_idx]
         post = log[main_idx:]
-        # init_array: priority 101 < 102 < 103 < 65535(default)
         assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
         assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
         assert pre.index("<init_array.103>") < pre.index("<init_array>")
-        # .ctors: reverse priority order (103, 102, 101, default)
         assert pre.index("<ctors.103>") < pre.index("<ctors.102>")
         assert pre.index("<ctors.102>") < pre.index("<ctors.101>")
         assert pre.index("<ctors.101>") < pre.index("<ctors>")
-        # .dtors section entries after main
         assert "<dtors>" in post
     elif sys.platform == "darwin":
-        # Mach-O: all constructors in __DATA,__mod_init_func (single section),
-        # destructors via __cxa_atexit (drained by MachOPlatform deinitialize).
-        # No .ctors/.dtors sections on Mach-O.
-        # Within a single object file, clang emits __mod_init_func entries in
-        # priority order, so ordering assertions hold for single-TU tests.
         main_idx = log.index("<main>")
         pre = log[:main_idx]
         post = log[main_idx:]
-        # constructors before main: priority 101 < 102 < 103 < default
         assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
         assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
         assert pre.index("<init_array.103>") < pre.index("<init_array>")
-        # destructors after main: __cxa_atexit LIFO order (reverse of registration)
         assert post.index("<fini_array>") < post.index("<fini_array.103>")
         assert post.index("<fini_array.103>") < post.index("<fini_array.102>")
         assert post.index("<fini_array.102>") < post.index("<fini_array.101>")
-        # ELF-only sections absent
         assert "<ctors>" not in log
         assert "<dtors>" not in log
 
