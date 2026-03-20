@@ -405,6 +405,7 @@ def test_ctor_dtor(v: Variant) -> None:
     lib.get_function(v.fn("main"))()
     del lib
 
+    print(f"ctor_dtor log: {log!r}")
     main_idx = log.index("<main>")
     pre = log[:main_idx]
     post = log[main_idx:]
