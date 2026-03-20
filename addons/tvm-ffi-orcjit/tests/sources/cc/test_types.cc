@@ -20,7 +20,14 @@
 
 #include <tvm/ffi/function.h>
 
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(test_zero_arg, []() { return 42; });
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(test_four_args, [](int a, int b, int c, int d) { return a + b + c + d; });
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(test_float_multiply, [](double a, double b) { return a * b; });
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(test_void_function, []() {});
+int test_zero_arg_impl() { return 42; }
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(test_zero_arg, test_zero_arg_impl);
+
+int test_four_args_impl(int a, int b, int c, int d) { return a + b + c + d; }
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(test_four_args, test_four_args_impl);
+
+double test_float_multiply_impl(double a, double b) { return a * b; }
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(test_float_multiply, test_float_multiply_impl);
+
+void test_void_function_impl() {}
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(test_void_function, test_void_function_impl);

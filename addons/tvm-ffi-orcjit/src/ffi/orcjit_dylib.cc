@@ -137,7 +137,7 @@ Optional<Function> ORCJITDynamicLibraryObj::GetFunction(const String& name) {
       std::vector<llvm::orc::JITDylib*> libs;
       libs.reserve(libraries.size());
       for (const ORCJITDynamicLibrary& lib : libraries) {
-        libs.push_back(&GetJITDylib());
+        libs.push_back(&lib->GetJITDylib());
       }
       SetLinkOrder(libs);
     });

@@ -22,6 +22,5 @@
 
 #include <stdexcept>
 
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(test_error, []() -> int {
-  throw std::runtime_error("test error");
-});
+int test_error_impl() { throw std::runtime_error("test error"); }
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(test_error, test_error_impl);
