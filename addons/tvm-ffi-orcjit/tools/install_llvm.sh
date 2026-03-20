@@ -24,10 +24,12 @@ case "${PLATFORM}" in
   osx-arm64)     MAMBA_ASSET="micromamba-osx-arm64" ;;
 esac
 
-# Install micromamba from GitHub releases (micro.mamba.pm cert expired as of 2026-03)
+# Install micromamba from GitHub releases (micro.mamba.pm cert expired as of 2026-03).
+# GitHub release assets are raw binaries (not tarballs).
 for i in 1 2 3; do
-  curl -sSL "https://github.com/mamba-org/micromamba-releases/releases/latest/download/${MAMBA_ASSET}" \
-    | tar -xvj -C /usr/local bin/micromamba && break
+  curl -sSL -o /usr/local/bin/micromamba \
+    "https://github.com/mamba-org/micromamba-releases/releases/latest/download/${MAMBA_ASSET}" \
+    && chmod +x /usr/local/bin/micromamba && break
   echo "micromamba download attempt $i failed, retrying..."
   sleep 5
 done
