@@ -257,6 +257,8 @@ def _register_host_functions():
 @pytest.mark.usefixtures("_register_host_functions")
 @pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
 def test_call_global(v: Variant) -> None:
+    if v.subdir.endswith("-clang-cl"):
+        pytest.xfail("clang-cl objects require __security_cookie (MSVC CRT symbol)")
     _, lib = make_lib(v.call_global_obj())
     add_func = lib.get_function(v.fn("test_call_global_add"))
     assert add_func(10, 20) == 30
@@ -400,6 +402,10 @@ def test_load_and_execute_cuda_function() -> None:
 
 @pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
 def test_ctor_dtor(v: Variant) -> None:
+    if v.subdir.endswith("-msvc"):
+        pytest.xfail("ORC JIT does not run .CRT$XC* initializers for MSVC objects")
+    if v.subdir.endswith("-clang-cl"):
+        pytest.xfail("clang-cl objects require __security_cookie (MSVC CRT symbol)")
     log = ""
 
     @tvm_ffi.register_global_func("append_log", override=True)
