@@ -405,7 +405,6 @@ def test_ctor_dtor(v: Variant) -> None:
     lib.get_function(v.fn("main"))()
     del lib
 
-    print(f"ctor_dtor log: {log!r}")
     main_idx = log.index("<main>")
     pre = log[:main_idx]
     post = log[main_idx:]
@@ -431,8 +430,14 @@ def test_ctor_dtor(v: Variant) -> None:
         assert "<ctors>" not in log
         assert "<dtors>" not in log
     elif sys.platform == "win32":
-        # COFF: .CRT$XC* sections run in alphabetical order + atexit
-        assert pre.index("<crt.XCA>") < pre.index("<crt.XCB>")
-        assert pre.index("<crt.XCB>") < pre.index("<crt.XCC>")
-        assert pre.index("<crt.XCC>") < pre.index("<crt.XCU>")
-        assert "<atexit>" in post
+        if "<crt.XCA>" in pre:
+            # MSVC-compiled: COFF .CRT$XC* sections in alphabetical order + atexit
+            assert pre.index("<crt.XCA>") < pre.index("<crt.XCB>")
+            assert pre.index("<crt.XCB>") < pre.index("<crt.XCC>")
+            assert pre.index("<crt.XCC>") < pre.index("<crt.XCU>")
+            assert "<atexit>" in post
+        else:
+            # Clang-compiled: __attribute__((constructor/destructor))
+            assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
+            assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
+            assert pre.index("<init_array.103>") < pre.index("<init_array>")
