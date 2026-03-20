@@ -85,11 +85,7 @@ add_test_object(sources/c/test_types.c)
 add_test_object(sources/c/test_link_order_base.c)
 add_test_object(sources/c/test_link_order_caller.c)
 add_test_object(sources/c/test_error.c)
-
-# C object files that use GCC/Clang extensions (__attribute__((constructor/destructor)))
-if(NOT WIN32)
-  add_test_object(sources/c/test_ctor_dtor.c)
-endif()
+add_test_object(sources/c/test_ctor_dtor.c)
 
 # CUDA object files — optional
 find_package(CUDAToolkit)

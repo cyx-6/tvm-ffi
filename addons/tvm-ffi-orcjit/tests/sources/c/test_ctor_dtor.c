@@ -21,8 +21,17 @@
  * Pure C version of the constructor/destructor test.
  * Uses TVMFFIFunctionGetGlobal + TVMFFIFunctionCall to call the host
  * "append_log" function from constructors and destructors.
+ *
+ * Platform-specific init/deinit mechanisms tested:
+ *   ELF   → .init_array/.fini_array (via __attribute__) + .ctors/.dtors
+ *   Mach-O → __DATA,__mod_init_func (via __attribute__) + explicit section
+ *   COFF  → .CRT$XC* sections + atexit()
  */
 #include <tvm/ffi/c_api.h>
+
+#ifdef _MSC_VER
+#include <stdlib.h> /* atexit */
+#endif
 
 static void puts_log(const char* msg) {
   TVMFFIByteArray func_name;
@@ -48,7 +57,11 @@ static void puts_log(const char* msg) {
 typedef void (*ctor_t)(void);
 typedef void (*dtor_t)(void);
 
-/* init_array / fini_array — works on all platforms */
+/* =========================================================================
+ * GCC / Clang (ELF + Mach-O): __attribute__((constructor/destructor))
+ * ========================================================================= */
+#ifndef _MSC_VER
+
 __attribute__((constructor)) void init_array(void) { puts_log("<init_array>"); }
 __attribute__((constructor(101))) void init_array_101(void) { puts_log("<init_array.101>"); }
 __attribute__((constructor(102))) void init_array_102(void) { puts_log("<init_array.102>"); }
@@ -59,7 +72,8 @@ __attribute__((destructor(101))) void fini_array_101(void) { puts_log("<fini_arr
 __attribute__((destructor(102))) void fini_array_102(void) { puts_log("<fini_array.102>"); }
 __attribute__((destructor(103))) void fini_array_103(void) { puts_log("<fini_array.103>"); }
 
-/* ELF-specific: explicit .ctors/.dtors section placements with priorities */
+/* ELF-specific: explicit .ctors/.dtors section placements with priorities.
+ * .ctors priorities are reversed: lower number = later execution. */
 #ifdef __ELF__
 static void ctors(void) { puts_log("<ctors>"); }
 __attribute__((section(".ctors"), used)) static ctor_t ctors_ptr = ctors;
@@ -85,6 +99,44 @@ __attribute__((section(".dtors.102"), used)) static dtor_t dtors_2_ptr = dtors_1
 static void dtors_103(void) { puts_log("<dtors.103>"); }
 __attribute__((section(".dtors.103"), used)) static dtor_t dtors_3_ptr = dtors_103;
 #endif /* __ELF__ */
+
+/* Mach-O-specific: explicit __DATA,__mod_init_func section placement. */
+#ifdef __APPLE__
+static void mod_init_func(void) { puts_log("<mod_init_func>"); }
+__attribute__((section("__DATA,__mod_init_func"), used))
+static ctor_t mod_init_ptr = mod_init_func;
+#endif /* __APPLE__ */
+
+#endif /* !_MSC_VER */
+
+/* =========================================================================
+ * MSVC (COFF): .CRT$XC* sections + atexit()
+ * Subsections run in alphabetical order: XCA < XCB < XCC < XCU.
+ * ========================================================================= */
+#ifdef _MSC_VER
+
+#pragma section(".CRT$XCA", read)
+#pragma section(".CRT$XCB", read)
+#pragma section(".CRT$XCC", read)
+#pragma section(".CRT$XCU", read)
+
+static void __cdecl crt_init_a(void) { puts_log("<crt.XCA>"); }
+__declspec(allocate(".CRT$XCA")) static ctor_t crt_init_a_ptr = crt_init_a;
+
+static void __cdecl crt_init_b(void) { puts_log("<crt.XCB>"); }
+__declspec(allocate(".CRT$XCB")) static ctor_t crt_init_b_ptr = crt_init_b;
+
+static void __cdecl crt_init_c(void) { puts_log("<crt.XCC>"); }
+__declspec(allocate(".CRT$XCC")) static ctor_t crt_init_c_ptr = crt_init_c;
+
+static void __cdecl crt_init_u(void) { puts_log("<crt.XCU>"); }
+__declspec(allocate(".CRT$XCU")) static ctor_t crt_init_u_ptr = crt_init_u;
+
+static void __cdecl crt_atexit(void) { puts_log("<atexit>"); }
+static void __cdecl crt_register_atexit(void) { atexit(crt_atexit); }
+__declspec(allocate(".CRT$XCU")) static ctor_t crt_atexit_reg_ptr = crt_register_atexit;
+
+#endif /* _MSC_VER */
 
 /* main: callable entry point */
 TVM_FFI_DLL_EXPORT int __tvm_ffi_main(

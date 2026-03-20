@@ -388,11 +388,10 @@ def test_load_and_execute_cuda_function() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Constructor / destructor (Linux/macOS, parametrized over C / C++)
+# Constructor / destructor (parametrized over C / C++)
 # ---------------------------------------------------------------------------
 
 
-@skip_on_windows
 @pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
 def test_ctor_dtor(v: Variant) -> None:
     log = ""
@@ -406,10 +405,12 @@ def test_ctor_dtor(v: Variant) -> None:
     lib.get_function(v.fn("main"))()
     del lib
 
+    main_idx = log.index("<main>")
+    pre = log[:main_idx]
+    post = log[main_idx:]
+
     if sys.platform == "linux":
-        main_idx = log.index("<main>")
-        pre = log[:main_idx]
-        post = log[main_idx:]
+        # ELF: init_array (priority order) + .ctors (reversed priority)
         assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
         assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
         assert pre.index("<init_array.103>") < pre.index("<init_array>")
@@ -418,14 +419,19 @@ def test_ctor_dtor(v: Variant) -> None:
         assert pre.index("<ctors.101>") < pre.index("<ctors>")
         assert "<dtors>" in post
     elif sys.platform == "darwin":
-        main_idx = log.index("<main>")
-        pre = log[:main_idx]
-        post = log[main_idx:]
+        # Mach-O: init_array (priority order) + explicit __mod_init_func
         assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
         assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
         assert pre.index("<init_array.103>") < pre.index("<init_array>")
+        assert "<mod_init_func>" in pre
         assert post.index("<fini_array>") < post.index("<fini_array.103>")
         assert post.index("<fini_array.103>") < post.index("<fini_array.102>")
         assert post.index("<fini_array.102>") < post.index("<fini_array.101>")
         assert "<ctors>" not in log
         assert "<dtors>" not in log
+    elif sys.platform == "win32":
+        # COFF: .CRT$XC* sections run in alphabetical order + atexit
+        assert pre.index("<crt.XCA>") < pre.index("<crt.XCB>")
+        assert pre.index("<crt.XCB>") < pre.index("<crt.XCC>")
+        assert pre.index("<crt.XCC>") < pre.index("<crt.XCU>")
+        assert "<atexit>" in post

@@ -26,10 +26,9 @@ using namespace tvm::ffi;
 using ctor_t = void (*)();
 using dtor_t = void (*)();
 
-// These work on all platforms:
-// ELF → .init_array / .fini_array
+// __attribute__((constructor/destructor)) works on both ELF and Mach-O:
+// ELF   → .init_array / .fini_array
 // Mach-O → __DATA,__mod_init_func / __cxa_atexit
-// COFF → .CRT$XC* / atexit
 __attribute__((constructor)) void init_array() { PUTS_LOG("<init_array>"); }
 
 __attribute__((constructor(101))) void init_array_101() { PUTS_LOG("<init_array.101>"); }
@@ -72,6 +71,13 @@ __attribute__((section(".dtors.102"), used)) static dtor_t dtors_2_ptr = dtors_1
 static void dtors_103() { PUTS_LOG("<dtors.103>"); }
 __attribute__((section(".dtors.103"), used)) static dtor_t dtors_3_ptr = dtors_103;
 #endif  // __ELF__
+
+// Mach-O-specific: explicit __DATA,__mod_init_func section placement.
+#ifdef __APPLE__
+static void mod_init_func() { PUTS_LOG("<mod_init_func>"); }
+__attribute__((section("__DATA,__mod_init_func"), used))
+static ctor_t mod_init_ptr = mod_init_func;
+#endif  // __APPLE__
 
 void main_impl() { PUTS_LOG("<main>"); }
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(main, main_impl);
