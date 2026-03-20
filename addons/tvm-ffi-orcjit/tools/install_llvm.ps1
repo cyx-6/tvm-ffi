@@ -42,9 +42,19 @@ if (-not (Test-Path $MicromambaExe)) {
     Write-Host "Downloading micromamba..."
     New-Item -ItemType Directory -Path $MicromambaDir -Force | Out-Null
     $tarball = "$env:TEMP\micromamba.tar.bz2"
-    Invoke-WebRequest -Uri $MicromambaUrl -OutFile $tarball
-    # Extract using tar (available on Windows 10+)
-    tar -xvjf $tarball -C $MicromambaDir
+    $maxRetries = 3
+    for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $MicromambaUrl -OutFile $tarball
+            # Extract using tar (available on Windows 10+)
+            tar -xvjf $tarball -C $MicromambaDir
+            break
+        } catch {
+            Write-Host "Attempt $attempt/$maxRetries failed: $_"
+            if ($attempt -eq $maxRetries) { throw }
+            Start-Sleep -Seconds 5
+        }
+    }
     if (-not (Test-Path $MicromambaExe)) {
         throw "Failed to extract micromamba"
     }
