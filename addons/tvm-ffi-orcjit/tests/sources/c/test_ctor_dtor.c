@@ -112,6 +112,10 @@ static ctor_t mod_init_ptr = mod_init_func;
 /* =========================================================================
  * MSVC (COFF): .CRT$XC* sections + atexit()
  * Subsections run in alphabetical order: XCA < XCB < XCC < XCU.
+ *
+ * Variables in these sections MUST NOT be static: both MSVC and clang-cl
+ * may optimize away unreferenced static variables even with __declspec(allocate).
+ * External linkage + unique names ensures the section data is emitted.
  * ========================================================================= */
 #ifdef _MSC_VER
 
@@ -121,20 +125,20 @@ static ctor_t mod_init_ptr = mod_init_func;
 #pragma section(".CRT$XCU", read)
 
 static void __cdecl crt_init_a(void) { puts_log("<crt.XCA>"); }
-__declspec(allocate(".CRT$XCA")) static ctor_t crt_init_a_ptr = crt_init_a;
+__declspec(allocate(".CRT$XCA")) ctor_t __tvm_test_crt_init_a = crt_init_a;
 
 static void __cdecl crt_init_b(void) { puts_log("<crt.XCB>"); }
-__declspec(allocate(".CRT$XCB")) static ctor_t crt_init_b_ptr = crt_init_b;
+__declspec(allocate(".CRT$XCB")) ctor_t __tvm_test_crt_init_b = crt_init_b;
 
 static void __cdecl crt_init_c(void) { puts_log("<crt.XCC>"); }
-__declspec(allocate(".CRT$XCC")) static ctor_t crt_init_c_ptr = crt_init_c;
+__declspec(allocate(".CRT$XCC")) ctor_t __tvm_test_crt_init_c = crt_init_c;
 
 static void __cdecl crt_init_u(void) { puts_log("<crt.XCU>"); }
-__declspec(allocate(".CRT$XCU")) static ctor_t crt_init_u_ptr = crt_init_u;
+__declspec(allocate(".CRT$XCU")) ctor_t __tvm_test_crt_init_u = crt_init_u;
 
 static void __cdecl crt_atexit(void) { puts_log("<atexit>"); }
 static void __cdecl crt_register_atexit(void) { atexit(crt_atexit); }
-__declspec(allocate(".CRT$XCU")) static ctor_t crt_atexit_reg_ptr = crt_register_atexit;
+__declspec(allocate(".CRT$XCU")) ctor_t __tvm_test_crt_atexit_reg = crt_register_atexit;
 
 #endif /* _MSC_VER */
 
