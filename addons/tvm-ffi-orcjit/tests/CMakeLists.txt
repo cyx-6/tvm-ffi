@@ -53,7 +53,9 @@ function(add_test_object source)
   add_library(${_target}_obj OBJECT "${source}")
   target_link_libraries(${_target}_obj PRIVATE tvm_ffi::header)
   if(_lang STREQUAL "C" AND MSVC)
-    target_compile_options(${_target}_obj PRIVATE /O2)
+    # /GS- disables security cookie checks (__security_cookie) which are
+    # CRT symbols the ORC JIT cannot resolve.
+    target_compile_options(${_target}_obj PRIVATE /O2 /GS-)
   else()
     target_compile_options(${_target}_obj PRIVATE -O2)
   endif()
