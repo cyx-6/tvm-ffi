@@ -29,11 +29,12 @@ This script demonstrates how to:
 import sys
 from pathlib import Path
 
-# Add the parent python directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "python"))
-
-
-from tvm_ffi_orcjit import ExecutionSession
+# Use the installed package if available; fall back to source tree for editable dev
+try:
+    from tvm_ffi_orcjit import ExecutionSession
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "python"))
+    from tvm_ffi_orcjit import ExecutionSession
 
 
 def main() -> int:
