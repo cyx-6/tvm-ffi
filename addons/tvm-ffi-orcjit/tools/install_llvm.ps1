@@ -33,33 +33,22 @@ $Prefix = if ($env:LLVM_PREFIX) { $env:LLVM_PREFIX } else { "C:\opt\llvm" }
 
 Write-Host "Installing LLVM $Version to $Prefix"
 
-# Install micromamba
-$MicromambaUrl = "https://micro.mamba.pm/api/micromamba/win-64/latest"
-$MicromambaDir = "$env:TEMP\micromamba"
-$MicromambaExe = "$MicromambaDir\Library\bin\micromamba.exe"
+# Install micromamba from GitHub releases (micro.mamba.pm cert expired as of 2026-03)
+$MicromambaExe = "$env:TEMP\micromamba.exe"
 
 if (-not (Test-Path $MicromambaExe)) {
-    Write-Host "Downloading micromamba..."
-    New-Item -ItemType Directory -Path $MicromambaDir -Force | Out-Null
-    $tarball = "$env:TEMP\micromamba.tar.bz2"
+    Write-Host "Downloading micromamba from GitHub releases..."
     $maxRetries = 3
     for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
         try {
-            # Use curl.exe (native Windows curl) instead of Invoke-WebRequest
-            # to avoid .NET TLS certificate trust issues on GitHub Actions runners.
-            & curl.exe -sSL -o $tarball $MicromambaUrl
+            & curl.exe -sSL -o $MicromambaExe "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64.exe"
             if ($LASTEXITCODE -ne 0) { throw "curl failed with exit code $LASTEXITCODE" }
-            # Extract using tar (available on Windows 10+)
-            tar -xvjf $tarball -C $MicromambaDir
             break
         } catch {
             Write-Host "Attempt $attempt/$maxRetries failed: $_"
             if ($attempt -eq $maxRetries) { throw }
             Start-Sleep -Seconds 5
         }
-    }
-    if (-not (Test-Path $MicromambaExe)) {
-        throw "Failed to extract micromamba"
     }
 }
 Write-Host "Using micromamba: $MicromambaExe"
