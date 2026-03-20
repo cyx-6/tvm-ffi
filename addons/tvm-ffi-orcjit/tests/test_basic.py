@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -79,6 +80,18 @@ class Variant:
 
     def call_global_obj(self):
         return f"{self.subdir}/test_call_global"
+
+    def types_obj(self):
+        return f"{self.subdir}/test_types"
+
+    def link_order_base_obj(self):
+        return f"{self.subdir}/test_link_order_base"
+
+    def link_order_caller_obj(self):
+        return f"{self.subdir}/test_link_order_caller"
+
+    def error_obj(self):
+        return f"{self.subdir}/test_error"
 
     def fn(self, base_name: str) -> str:
         return base_name
@@ -243,6 +256,136 @@ def test_call_global(v: Variant) -> None:
     mul_func = lib.get_function(v.fn("test_call_global_mul"))
     assert mul_func(7, 6) == 42
     assert mul_func(11, 11) == 121
+
+
+# ---------------------------------------------------------------------------
+# Error handling — pure Python (Group 1)
+# ---------------------------------------------------------------------------
+
+
+def test_empty_library() -> None:
+    """get_function on an empty library raises AttributeError."""
+    session = ExecutionSession()
+    lib = session.create_library("empty")
+    with pytest.raises(AttributeError, match="Module has no function"):
+        lib.get_function("nonexistent")
+
+
+def test_invalid_object_file_path() -> None:
+    """Adding a nonexistent object file raises an error."""
+    session = ExecutionSession()
+    lib = session.create_library("bad_path")
+    with pytest.raises(Exception):
+        lib.add("/nonexistent_path/does_not_exist.o")
+
+
+def test_invalid_object_file_content() -> None:
+    """Adding a file with garbage content raises an error."""
+    with tempfile.NamedTemporaryFile(suffix=".o", delete=False) as f:
+        f.write(b"this is not a valid object file")
+        f.flush()
+        session = ExecutionSession()
+        lib = session.create_library("bad_content")
+        with pytest.raises(Exception):
+            lib.add(f.name)
+
+
+def test_multiple_independent_sessions() -> None:
+    """Two independent sessions don't interfere with each other."""
+    session1 = ExecutionSession()
+    session2 = ExecutionSession()
+    _, lib1 = make_lib(_all_variants[0].funcs_obj(), session=session1)
+    _, lib2 = make_lib(_all_variants[0].funcs2_obj(), session=session2)
+
+    assert lib1.get_function("test_add")(5, 3) == 8
+    assert lib2.get_function("test_subtract")(10, 3) == 7
+
+    # Each session's library doesn't see the other's functions
+    with pytest.raises(AttributeError, match="Module has no function"):
+        lib1.get_function("test_subtract")
+    with pytest.raises(AttributeError, match="Module has no function"):
+        lib2.get_function("test_add")
+
+
+def test_library_name_collision() -> None:
+    """Creating two libraries with the same name in one session — document behavior."""
+    session = ExecutionSession()
+    lib1 = session.create_library("same_name")
+    # Second create with same name should either raise or return a new lib.
+    # We just document whichever behavior occurs.
+    try:
+        lib2 = session.create_library("same_name")
+        # If it succeeds, the two libraries should be independent
+        assert lib2 is not None
+    except Exception:
+        # If it raises, that's also valid behavior
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Type variety — parametrized over C / C++ (Group 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_zero_arg_function(v: Variant) -> None:
+    """Zero-arg function returns constant 42."""
+    _, lib = make_lib(v.types_obj())
+    assert lib.get_function(v.fn("test_zero_arg"))() == 42
+
+
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_four_arg_function(v: Variant) -> None:
+    """Four integer arguments summed."""
+    _, lib = make_lib(v.types_obj())
+    assert lib.get_function(v.fn("test_four_args"))(1, 2, 3, 4) == 10
+    assert lib.get_function(v.fn("test_four_args"))(100, 200, 300, 400) == 1000
+
+
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_float_function(v: Variant) -> None:
+    """Float multiply returns approximate result."""
+    _, lib = make_lib(v.types_obj())
+    result = lib.get_function(v.fn("test_float_multiply"))(3.14, 2.0)
+    assert result == pytest.approx(6.28)
+
+
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_void_function(v: Variant) -> None:
+    """Void function returns None."""
+    _, lib = make_lib(v.types_obj())
+    result = lib.get_function(v.fn("test_void_function"))()
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Advanced — cross-library linking and error propagation (Group 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_set_link_order(v: Variant) -> None:
+    """Cross-library symbol resolution via set_link_order."""
+    session = ExecutionSession()
+    # Base library exports helper_add
+    lib_base = session.create_library("base")
+    lib_base.add(obj(v.link_order_base_obj()))
+    # Caller library references helper_add from base
+    lib_caller = session.create_library("caller")
+    lib_caller.set_link_order(lib_base)
+    lib_caller.add(obj(v.link_order_caller_obj()))
+
+    cross_add = lib_caller.get_function(v.fn("cross_lib_add"))
+    assert cross_add(10, 20) == 30
+    assert cross_add(100, 200) == 300
+
+
+@pytest.mark.parametrize("v", _all_variants, ids=_variant_id)
+def test_error_propagation(v: Variant) -> None:
+    """JIT function that signals an error raises a Python exception."""
+    _, lib = make_lib(v.error_obj())
+    with pytest.raises(Exception, match="test error"):
+        lib.get_function(v.fn("test_error"))()
 
 
 # ---------------------------------------------------------------------------
