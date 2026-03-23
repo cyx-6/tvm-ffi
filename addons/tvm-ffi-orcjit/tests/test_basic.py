@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -40,41 +39,6 @@ _KNOWN_SUBDIRS = [
     "c-msvc",                           # MSVC (Windows, C only)
     "c-clang-cl",                       # clang-cl (Windows, C only)
 ]
-
-
-def _dump_coff_sections(path: Path) -> None:
-    """Print COFF section names from an object file (debug helper)."""
-    try:
-        with open(path, "rb") as f:
-            data = f.read()
-        # COFF header: 2-byte machine, 2-byte num_sections, ...
-        # then 4-byte timestamp, 4-byte symtab offset, 4-byte num_symbols, 2-byte opt_hdr_size
-        if len(data) < 20:
-            return
-        machine, num_sections = struct.unpack_from("<HH", data, 0)
-        _, sym_offset, num_symbols, opt_hdr_size = struct.unpack_from("<IIIH", data, 4)
-        print(f"[debug] COFF {path.name}: machine=0x{machine:04x}, "
-              f"{num_sections} sections, opt_hdr={opt_hdr_size}", flush=True)
-        sec_start = 20 + opt_hdr_size
-        for i in range(num_sections):
-            off = sec_start + i * 40
-            if off + 40 > len(data):
-                break
-            raw_name = data[off:off+8]
-            # Long name: /offset into string table
-            if raw_name[:1] == b"/":
-                str_offset = int(raw_name[1:].rstrip(b"\x00").decode("ascii", errors="replace"))
-                str_table_off = sym_offset + num_symbols * 18
-                end = data.index(b"\x00", str_table_off + str_offset)
-                name = data[str_table_off + str_offset:end].decode("ascii", errors="replace")
-            else:
-                name = raw_name.rstrip(b"\x00").decode("ascii", errors="replace")
-            sec_size = struct.unpack_from("<I", data, off + 16)[0]
-            sec_chars = struct.unpack_from("<I", data, off + 36)[0]
-            print(f"[debug]   section[{i}]: {name!r:30s} size={sec_size:5d} "
-                  f"chars=0x{sec_chars:08x}", flush=True)
-    except Exception as e:
-        print(f"[debug] Failed to dump sections for {path}: {e}", flush=True)
 
 
 def obj(name: str) -> str:
@@ -451,8 +415,10 @@ def test_ctor_dtor(v: Variant) -> None:
     pre = log[:main_idx]
     post = log[main_idx:]
 
-    if v.subdir.endswith(("-msvc", "-clang-cl")):
-        # MSVC/clang-cl: COFF .CRT$XC* constructors + .CRT$XT* terminators
+    if sys.platform == "win32":
+        # Windows (all compilers): COFF .CRT$XC* constructors + .CRT$XT* terminators.
+        # All Windows compilers (MSVC, clang-cl, and LLVM Clang targeting MSVC ABI)
+        # define _MSC_VER, so the source uses #pragma section / __declspec(allocate).
         assert "<crt.XCA>" in pre, f"CRT initializers not found in log: {log!r}"
         assert pre.index("<crt.XCA>") < pre.index("<crt.XCB>")
         assert pre.index("<crt.XCB>") < pre.index("<crt.XCC>")
@@ -479,16 +445,3 @@ def test_ctor_dtor(v: Variant) -> None:
         assert post.index("<fini_array.102>") < post.index("<fini_array.101>")
         assert "<ctors>" not in log
         assert "<dtors>" not in log
-    else:
-        # Windows non-MSVC (Clang): __attribute__((constructor/destructor))
-        # Debug: dump object sections and full log to diagnose CI failures
-        obj_path = TEST_DIR / f"{v.ctor_dtor_obj()}.o"
-        _dump_coff_sections(obj_path)
-        print(f"[debug] full log: {log!r}", flush=True)
-        print(f"[debug] pre (before <main>): {pre!r}", flush=True)
-        print(f"[debug] post (from <main>): {post!r}", flush=True)
-        assert "<init_array.101>" in pre, \
-            f"<init_array.101> not in pre-main log: {log!r}"
-        assert pre.index("<init_array.101>") < pre.index("<init_array.102>")
-        assert pre.index("<init_array.102>") < pre.index("<init_array.103>")
-        assert pre.index("<init_array.103>") < pre.index("<init_array>")

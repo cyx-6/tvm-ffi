@@ -113,8 +113,7 @@ static initialization and finalization:
 |----------|---------------|----------------|
 | Linux (ELF) | `.init_array` (with priorities), `.ctors` (reversed) | `.dtors` |
 | macOS (Mach-O) | `.init_array` (with priorities), `__mod_init_func` | `.fini_array` (with priorities) |
-| Windows (Clang) | `.init_array` (via `__attribute__((constructor))`) | N/A |
-| Windows (MSVC/clang-cl) | `.CRT$XCA`..`XCU` (alphabetical order) | `.CRT$XTA`..`XTZ` (alphabetical order) |
+| Windows (COFF) | `.CRT$XCA`..`XCU` (alphabetical order) | `.CRT$XTA`..`XTZ` (alphabetical order) |
 
 ## CI
 
