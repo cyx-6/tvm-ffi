@@ -104,10 +104,13 @@ def _build_variant(
     include_dirs: list[str],
     c_outdir: Path,
     cc_outdir: Path | None,
+    c_skip: set[str] | None = None,
 ) -> None:
     """Build all test objects for one compiler variant."""
     print(f"\n--- {name} ---", flush=True)
     for src in sorted(SOURCES_C.glob("*.c")):
+        if c_skip and src.stem in c_skip:
+            continue
         _compile(c_compiler, src, c_outdir / f"{src.stem}.o", c_flags, include_dirs)
     if cxx_compiler and cc_outdir:
         for src in sorted(SOURCES_CC.glob("*.cc")):
@@ -197,12 +200,16 @@ def _build_all(llvm_prefix: str) -> None:
             if candidate.exists():
                 clang = str(candidate)
         if clang:
+            # Skip test_ctor_dtor: LLVM Clang targeting MSVC ABI does not
+            # support __attribute__((constructor)) in a way ORC JIT can
+            # process.  Ctor/dtor coverage is provided by MSVC and clang-cl.
             _build_variant(
                 "LLVM Clang",
                 c_compiler=clang, cxx_compiler=None,
                 c_flags=c_flags, cxx_flags=[],
                 include_dirs=include_dirs,
                 c_outdir=TESTS_DIR / "c", cc_outdir=None,
+                c_skip={"test_ctor_dtor"},
             )
         # MSVC
         if shutil.which("cl"):
