@@ -200,16 +200,23 @@ def _build_all(llvm_prefix: str) -> None:
             if candidate.exists():
                 clang = str(candidate)
         if clang:
-            # Skip test_ctor_dtor: LLVM Clang targeting MSVC ABI does not
-            # support __attribute__((constructor)) in a way ORC JIT can
-            # process.  Ctor/dtor coverage is provided by MSVC and clang-cl.
+            # Print target triple for debugging ctor/dtor section generation
+            try:
+                result = subprocess.run(
+                    [clang, "-v", "-x", "c", "/dev/null", "-c", "-o", "NUL"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                for line in (result.stderr or "").splitlines():
+                    if "target" in line.lower() or "version" in line.lower():
+                        print(f"  [debug] {line.strip()}", flush=True)
+            except Exception:
+                pass
             _build_variant(
                 "LLVM Clang",
                 c_compiler=clang, cxx_compiler=None,
                 c_flags=c_flags, cxx_flags=[],
                 include_dirs=include_dirs,
                 c_outdir=TESTS_DIR / "c", cc_outdir=None,
-                c_skip={"test_ctor_dtor"},
             )
         # MSVC
         if shutil.which("cl"):
