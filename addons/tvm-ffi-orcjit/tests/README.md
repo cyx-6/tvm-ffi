@@ -17,44 +17,34 @@
 
 # TVM-FFI-OrcJIT Tests
 
-## Building Test Objects
+## Quick Start
 
-Tests require pre-built object files compiled from `sources/`. The default build
-uses the system C/C++ compiler:
-
-```bash
-cd tests
-cmake -B build -DPython_EXECUTABLE=$(which python)
-cmake --build build
-cmake --install build
-```
-
-This installs object files into `c/` and `cc/` subdirectories (e.g. `c/test_funcs.o`).
-
-### Multi-compiler builds
-
-To build objects with an additional compiler, use `TEST_OBJ_INSTALL_SUFFIX` to
-install into a separate subdirectory:
+Build all compiler variants and run all tests in one step:
 
 ```bash
-# Example: build with GCC as a second variant
-cmake -B build-gcc \
-  -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
-  -DTEST_OBJ_INSTALL_SUFFIX=-gcc \
-  -DPython_EXECUTABLE=$(which python)
-cmake --build build-gcc
-cmake --install build-gcc
+python tests/run_all_tests.py
 ```
 
-This installs objects to `c-gcc/` and `cc-gcc/`. The Python test harness
-auto-discovers available variants by checking for `test_funcs.o` in known
-subdirectories.
+This auto-detects the platform, compiles test objects with every available
+compiler, runs pytest, and runs the quick-start examples. Objects are cached
+by mtime — re-running is near-instant when nothing changed.
 
-## Running Tests
+### Build only (no tests)
+
+```bash
+python tests/build_test_objects.py [--llvm-prefix /opt/llvm]
+```
+
+### Run tests only (objects must already exist)
 
 ```bash
 pytest tests/ -v
 ```
+
+### Alternative: cmake-based build
+
+A `CMakeLists.txt` is also provided for cmake-based workflows.
+See `TEST_OBJ_INSTALL_SUFFIX` for multi-compiler builds.
 
 ## Tested Configurations
 
@@ -63,15 +53,16 @@ with multiple compilers; `test_basic.py` auto-discovers which are available.
 
 | Platform | Variant | Subdir | Compiler | Languages |
 |----------|---------|--------|----------|-----------|
-| All | default | `c/`, `cc/` | LLVM clang | C, C++ |
+| Linux, macOS | default | `c/`, `cc/` | LLVM Clang | C, C++ |
 | Linux | gcc | `c-gcc/`, `cc-gcc/` | GCC | C, C++ |
 | macOS | appleclang | `c-appleclang/`, `cc-appleclang/` | Apple Clang (`/usr/bin/clang`) | C, C++ |
-| Windows | msvc | `c-msvc/` | MSVC (`cl`) via Visual Studio generator | C only |
-| Windows | clang-cl | `c-clang-cl/` | clang-cl via Visual Studio `-T ClangCL` | C only |
+| Windows | default | `c/` | LLVM Clang | C only |
+| Windows | msvc | `c-msvc/` | MSVC (`cl`) | C only |
+| Windows | clang-cl | `c-clang-cl/` | clang-cl | C only |
 
-Windows MSVC/clang-cl variants are C-only because MSVC's C++ ABI (name
-mangling, vtable layout, RTTI) differs from Clang's, and the ORC JIT uses
-LLVM's JITLink which expects Clang-compatible objects.
+All Windows variants are C-only. C++ objects use `try`/`catch`
+(via `TVM_FFI_SAFE_CALL_BEGIN/END`) which requires Itanium exception ABI
+symbols that the MSVC-built host process cannot resolve.
 
 ### Platform-specific compiler flags
 
@@ -94,8 +85,10 @@ tests/
   c-gcc/        Installed C objects (GCC variant)
   cc-gcc/       Installed C++ objects (GCC variant)
   ...           Other compiler variant directories
-  test_basic.py Python test cases
-  CMakeLists.txt Build configuration for test objects
+  build_test_objects.py  Direct compiler build script
+  run_all_tests.py      Build + test entry point (CI)
+  test_basic.py         Python test cases
+  CMakeLists.txt        Alternative cmake build
 ```
 
 ### Source files
@@ -121,9 +114,9 @@ static initialization and finalization:
 | Linux (ELF) | `.init_array` (with priorities), `.ctors` (reversed) | `.dtors` |
 | macOS (Mach-O) | `.init_array` (with priorities), `__mod_init_func` | `.fini_array` (with priorities) |
 | Windows (Clang) | `.init_array` (via `__attribute__((constructor))`) | N/A |
-| Windows (MSVC) | `.CRT$XCA`..`XCU` (alphabetical order) | `.CRT$XTA`..`XTZ` (alphabetical order) |
+| Windows (MSVC/clang-cl) | `.CRT$XCA`..`XCU` (alphabetical order) | `.CRT$XTA`..`XTZ` (alphabetical order) |
 
 ## CI
 
-The CI workflow (`.github/workflows/orcjit-build.yml`) builds test objects with
-all compiler variants per platform before running pytest via `cibuildwheel`.
+The CI workflow (`.github/workflows/orcjit-build.yml`) runs `run_all_tests.py`
+via `cibuildwheel`, which builds objects and runs all tests in a single step.

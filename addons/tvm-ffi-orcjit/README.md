@@ -38,28 +38,23 @@ TVM-FFI exported functions.
 Object files compiled with any of the following compiler/platform combinations
 can be loaded and executed by the ORC JIT:
 
-| Platform | Compiler | C | C++ |
-|----------|----------|:-:|:---:|
-| Linux x86_64 | LLVM Clang | yes | yes |
-| Linux x86_64 | GCC | yes | yes |
-| Linux aarch64 | LLVM Clang | yes | yes |
-| Linux aarch64 | GCC | yes | yes |
-| macOS arm64 | LLVM Clang | yes | yes |
-| macOS arm64 | Apple Clang | yes | yes |
-| Windows AMD64 | LLVM Clang (MinGW) | yes | yes |
-| Windows AMD64 | MSVC (`cl`) | yes | no |
-| Windows AMD64 | clang-cl | yes | no |
+| Platform | Compilers | C | C++ |
+|----------|-----------|:-:|:---:|
+| Linux (x86_64, aarch64) | LLVM Clang, GCC | yes | yes |
+| macOS (arm64) | LLVM Clang, Apple Clang | yes | yes |
+| Windows (AMD64) | LLVM Clang, MSVC, clang-cl | yes | no |
 
-MSVC and clang-cl are C-only because their C++ ABI (name mangling, exception
-handling, RTTI) is incompatible with LLVM's JITLink, which expects
-Itanium/Clang-compatible objects. Pure C objects using the `TVMFFISafeCallType`
-ABI work across all compilers.
+Windows is C-only across all compilers. C++ objects compiled with
+`TVM_FFI_DLL_EXPORT_TYPED_FUNC` use `try`/`catch` (via `TVM_FFI_SAFE_CALL_BEGIN/END`),
+which requires Itanium exception ABI symbols (`__cxa_begin_catch`,
+`__gxx_personality_v0`, etc.) that the MSVC-built host process cannot provide.
+Pure C objects using the `TVMFFISafeCallType` ABI work on all platforms.
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - CMake 3.18+
 - LLVM 22+ (with ORC JIT support)
 - C/C++ compiler with C++17 support
@@ -128,7 +123,7 @@ base_lib = session.create_library("base")
 base_lib.add("math_ops.o")
 
 caller_lib = session.create_library("caller")
-caller_lib.set_link_order([base_lib])  # Can resolve symbols from base_lib
+caller_lib.set_link_order(base_lib)  # Can resolve symbols from base_lib
 caller_lib.add("caller.o")
 
 result = caller_lib.get_function("call_math")(10, 20)
@@ -139,7 +134,7 @@ result = caller_lib.get_function("call_math")(10, 20)
 ### C++ (Linux/macOS)
 
 ```cpp
-#include <tvm/ffi/c_ffi_api.h>
+#include <tvm/ffi/function.h>
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(add, [](int a, int b) {
     return a + b;
@@ -196,7 +191,9 @@ tvm-ffi-orcjit/
 │   └── dylib.py                # Python DynamicLibrary wrapper
 ├── tests/                      # See tests/README.md
 ├── examples/quick-start/       # Complete example with CMake
-└── tools/install_llvm.sh       # LLVM installation helper (conda/micromamba)
+└── tools/
+    ├── install_llvm.sh         # LLVM installation helper (Linux/macOS)
+    └── install_llvm.ps1        # LLVM installation helper (Windows)
 ```
 
 ## CI

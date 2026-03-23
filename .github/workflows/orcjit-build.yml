@@ -65,64 +65,9 @@ jobs:
           CIBW_BEFORE_ALL_WINDOWS: >-
             powershell -ExecutionPolicy Bypass -File {project}\addons\tvm-ffi-orcjit\tools\install_llvm.ps1
           CIBW_TEST_REQUIRES: pytest
-          CIBW_BEFORE_TEST_LINUX: >-
-            pip install apache-tvm-ffi &&
-            (cd {project}/addons/tvm-ffi-orcjit/tests &&
-            cmake -B build -DCMAKE_C_COMPILER=/opt/llvm/bin/clang
-            -DCMAKE_CXX_COMPILER=/opt/llvm/bin/clang++ -DPython_EXECUTABLE=$(which python) &&
-            cmake --build build &&
-            cmake --install build &&
-            cmake -B build-gcc -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
-            -DTEST_OBJ_INSTALL_SUFFIX=-gcc -DPython_EXECUTABLE=$(which python) &&
-            cmake --build build-gcc &&
-            cmake --install build-gcc) &&
-            (cd {project}/addons/tvm-ffi-orcjit/examples/quick-start &&
-            cmake -B build -DCMAKE_CXX_COMPILER=/opt/llvm/bin/clang++ -DPython_EXECUTABLE=$(which python) &&
-            cmake --build build)
-          CIBW_BEFORE_TEST_MACOS: >-
-            pip install apache-tvm-ffi &&
-            (cd {project}/addons/tvm-ffi-orcjit/tests &&
-            cmake -B build -DCMAKE_C_COMPILER=/opt/llvm/bin/clang
-            -DCMAKE_CXX_COMPILER=/opt/llvm/bin/clang++ -DPython_EXECUTABLE=$(which python) &&
-            cmake --build build &&
-            cmake --install build &&
-            cmake -B build-appleclang -DCMAKE_C_COMPILER=/usr/bin/clang
-            -DCMAKE_CXX_COMPILER=/usr/bin/clang++ -DTEST_OBJ_INSTALL_SUFFIX=-appleclang
-            -DPython_EXECUTABLE=$(which python) &&
-            cmake --build build-appleclang &&
-            cmake --install build-appleclang) &&
-            (cd {project}/addons/tvm-ffi-orcjit/examples/quick-start &&
-            cmake -B build -DCMAKE_CXX_COMPILER=/opt/llvm/bin/clang++ -DPython_EXECUTABLE=$(which python) &&
-            cmake --build build)
-          CIBW_BEFORE_TEST_WINDOWS: >-
-            pip install apache-tvm-ffi &&
-            pushd {project}\addons\tvm-ffi-orcjit\tests &&
-            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=%PYTHON% &&
-            cmake --build build &&
-            cmake --install build &&
-            cmake -B build-msvc -G "Visual Studio 17 2022"
-            -DTEST_OBJ_INSTALL_SUFFIX=-msvc -DPython_EXECUTABLE=%PYTHON% &&
-            cmake --build build-msvc --config Release &&
-            cmake --install build-msvc --config Release &&
-            cmake -B build-clangcl -G "Visual Studio 17 2022" -T ClangCL
-            -DTEST_OBJ_INSTALL_SUFFIX=-clang-cl -DPython_EXECUTABLE=%PYTHON% &&
-            cmake --build build-clangcl --config Release &&
-            cmake --install build-clangcl --config Release &&
-            popd &&
-            pushd {project}\addons\tvm-ffi-orcjit\examples\quick-start &&
-            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=%PYTHON% &&
-            cmake --build build &&
-            popd
+          CIBW_BEFORE_TEST: pip install apache-tvm-ffi
           CIBW_TEST_COMMAND: >-
-            pytest {project}/addons/tvm-ffi-orcjit/tests -v &&
-            (cd {project}/addons/tvm-ffi-orcjit/examples/quick-start &&
-            python run.py --lang cpp &&
-            python run.py --lang c)
-          CIBW_TEST_COMMAND_WINDOWS: >-
-            pytest {project}\addons\tvm-ffi-orcjit\tests -v &&
-            pushd {project}\addons\tvm-ffi-orcjit\examples\quick-start &&
-            python run.py --lang c &&
-            popd
+            python {project}/addons/tvm-ffi-orcjit/tests/run_all_tests.py
 
       - uses: actions/upload-artifact@v4
         with:

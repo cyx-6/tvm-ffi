@@ -31,7 +31,7 @@ load them into the ORC JIT at runtime, and call them from Python.
 
 ## Prerequisites
 
-- Python 3.9+, CMake 3.18+, C/C++ compiler
+- Python 3.10+, CMake 3.18+, C/C++ compiler
 - `apache-tvm-ffi` and `tvm-ffi-orcjit` packages installed
 
 ## Steps
@@ -43,8 +43,8 @@ cmake -B build
 cmake --build build
 ```
 
-This produces `add.o` (C++) and `add_c.o` (pure C). On Windows with the
-default Ninja generator, only the C variant is built (C++ requires Clang).
+This produces `add.o` (C++) and `add_c.o` (pure C). On Windows, only the C
+variant is built (C++ is not supported for ORC JIT on Windows).
 
 ### 2. Run
 
@@ -85,9 +85,8 @@ print(add(10, 20))                 # Call like a normal function → 30
 |----------|:---:|:---:|
 | Linux (Clang/GCC) | yes | yes |
 | macOS (Clang/Apple Clang) | yes | yes |
-| Windows (Clang/Ninja) | yes | yes |
-| Windows (MSVC/clang-cl) | no | yes |
+| Windows (all compilers) | no | yes |
 
-MSVC and clang-cl cannot compile C++ TVM-FFI exports because the C++ ABI
-(name mangling, vtable layout) differs from Clang's, and JITLink expects
-Clang-compatible objects. Use the pure C variant on Windows with MSVC/clang-cl.
+C++ is not supported for ORC JIT on Windows. The `TVM_FFI_DLL_EXPORT_TYPED_FUNC`
+macro uses `try`/`catch` which requires Itanium exception ABI symbols that the
+MSVC-built host process cannot provide. Use the pure C variant on Windows.
