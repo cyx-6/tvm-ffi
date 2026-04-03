@@ -88,6 +88,7 @@ def _discover_cpp_variants() -> list[str]:
 
 _c_variants = _discover_c_variants()
 _cpp_variants = _discover_cpp_variants()
+_all_variants = _c_variants + _cpp_variants
 
 _is_linux = sys.platform == "linux"
 
@@ -186,7 +187,7 @@ def free_blockers(blockers: list[tuple[int, int]]) -> None:
 
 
 @pytest.mark.skipif(not _is_linux, reason="Arena is Linux-only")
-@pytest.mark.parametrize("variant", _c_variants)
+@pytest.mark.parametrize("variant", _all_variants)
 def test_arena_colocation(variant: str) -> None:
     """With arena, objects in separate libraries have close code addresses.
 
@@ -227,7 +228,7 @@ def test_arena_colocation(variant: str) -> None:
 
 
 @pytest.mark.skipif(not _is_linux, reason="Arena is Linux-only")
-@pytest.mark.parametrize("variant", _c_variants)
+@pytest.mark.parametrize("variant", _all_variants)
 def test_no_arena_scattered(variant: str) -> None:
     """Without arena, VA blocker pushes objects far apart.
 
@@ -270,7 +271,7 @@ def test_no_arena_scattered(variant: str) -> None:
 
 
 @pytest.mark.skipif(not _is_linux, reason="Arena is Linux-only")
-@pytest.mark.parametrize("variant", _c_variants)
+@pytest.mark.parametrize("variant", _all_variants)
 def test_arena_hidden_symbol_with_blocker(variant: str) -> None:
     """Arena prevents hidden-visibility relocation overflow under VA pressure.
 
@@ -308,7 +309,7 @@ def test_arena_hidden_symbol_with_blocker(variant: str) -> None:
 
 
 @pytest.mark.skipif(not _is_linux, reason="Arena is Linux-only")
-@pytest.mark.parametrize("variant", _c_variants)
+@pytest.mark.parametrize("variant", _all_variants)
 def test_large_data_section(variant: str) -> None:
     """Load object with a 4MB .nv_fatbin section — basic correctness.
 
