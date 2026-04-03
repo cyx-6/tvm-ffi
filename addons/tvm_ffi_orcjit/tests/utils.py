@@ -183,16 +183,19 @@ def build_test_objects(out_dir: Path | None = None) -> Path:
                 c_outdir=out_dir / "c-gcc",
                 cc_outdir=out_dir / "cc-gcc",
             )
-            # Non-PIC variant for __dso_handle PC32 overflow testing (x86_64).
-            # With -fno-PIC, GCC emits R_X86_64_PC32 for __dso_handle instead
-            # of R_X86_64_GOTPCRELX, enabling PC32 overflow testing with VA blocker.
+            # PIE variant for __dso_handle PC32 overflow testing (x86_64).
+            # With -fpie (overriding the default -fPIC), GCC may use direct
+            # R_X86_64_PC32 for hidden-visibility externals like __dso_handle
+            # instead of R_X86_64_GOTPCRELX (GOT-relative).  Unlike -fno-PIC,
+            # PIE code avoids R_X86_64_32 absolute relocations that always
+            # overflow at high JIT addresses.
             _build_variant(
-                "GCC (no PIC)",
+                "GCC (PIE)",
                 cc=None,
                 cxx="g++",
-                extra_cflags=[*extra, "-fno-PIC", "-fno-pie"],
-                c_outdir=out_dir / "c-gcc-nopic",
-                cc_outdir=out_dir / "cc-gcc-nopic",
+                extra_cflags=[*extra, "-fpie"],
+                c_outdir=out_dir / "c-gcc-pie",
+                cc_outdir=out_dir / "cc-gcc-pie",
             )
         if system == "Darwin" and Path("/usr/bin/clang").exists():
             _build_variant(
