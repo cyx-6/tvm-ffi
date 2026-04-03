@@ -216,9 +216,8 @@ jobs:
           cargo test
 
   orcjit:
-    needs: [lint, prepare]
+    needs: [prepare]
     if: >
-      needs.prepare.outputs.orcjit_changed == 'true' &&
       needs.prepare.outputs.should_skip_ci_commit != 'true' &&
       needs.prepare.outputs.should_skip_ci_docs_only != 'true'
     name: orcjit ${{ matrix.os }} (${{ matrix.arch }})
