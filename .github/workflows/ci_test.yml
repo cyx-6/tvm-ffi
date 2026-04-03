@@ -25,6 +25,7 @@ on:
       - main
       # dev branch is used for testing purposes
       - dev
+      - reproduce
 
 jobs:
   prepare:
@@ -58,10 +59,16 @@ jobs:
       - name: Get changed OrcJIT files
         id: orcjit_files
         run: |
-          FILES=$(git diff --name-only --diff-filter=ACMR origin/${{ github.base_ref }}...HEAD -- \
-            addons/tvm_ffi_orcjit/ .github/actions/build-orcjit-wheel/ | tr '\n' ' ')
-          echo "files=$FILES" >> $GITHUB_OUTPUT
-          [ -n "$FILES" ] && echo "changed=true" >> $GITHUB_OUTPUT || echo "changed=false" >> $GITHUB_OUTPUT
+          BASE_REF="${{ github.base_ref }}"
+          if [ -z "$BASE_REF" ]; then
+            # Push event — no base_ref; assume orcjit changed
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            FILES=$(git diff --name-only --diff-filter=ACMR origin/${BASE_REF}...HEAD -- \
+              addons/tvm_ffi_orcjit/ .github/actions/build-orcjit-wheel/ | tr '\n' ' ')
+            echo "files=$FILES" >> $GITHUB_OUTPUT
+            [ -n "$FILES" ] && echo "changed=true" >> $GITHUB_OUTPUT || echo "changed=false" >> $GITHUB_OUTPUT
+          fi
 
   lint:
     needs: [prepare]
