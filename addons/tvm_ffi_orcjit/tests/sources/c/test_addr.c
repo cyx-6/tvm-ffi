@@ -21,11 +21,11 @@
  * Returns the code address of this function — for arena co-location tests.
  * Load into multiple libraries to verify they land in the same arena region.
  */
-#include <tvm/ffi/c_api.h>
 #include <stdint.h>
+#include <tvm/ffi/c_api.h>
 
-TVM_FFI_DLL_EXPORT int __tvm_ffi_code_address(void* self, const TVMFFIAny* args,
-                                               int32_t num_args, TVMFFIAny* result) {
+TVM_FFI_DLL_EXPORT int __tvm_ffi_code_address(void* self, const TVMFFIAny* args, int32_t num_args,
+                                              TVMFFIAny* result) {
   result->type_index = kTVMFFIInt;
   result->zero_padding = 0;
   result->v_int64 = (int64_t)(uintptr_t)&__tvm_ffi_code_address;

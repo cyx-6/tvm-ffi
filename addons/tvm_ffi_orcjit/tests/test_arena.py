@@ -38,6 +38,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import sys
+from pathlib import Path
 
 import pytest
 from tvm_ffi_orcjit import ExecutionSession
@@ -80,7 +81,9 @@ def _discover_c_variants() -> list[str]:
 
 def _discover_cpp_variants() -> list[str]:
     """Discover available C++ compiler variants (for __dso_handle tests)."""
-    return [s for s in _KNOWN_SUBDIRS if s.startswith("cc") and (OBJ_DIR / s / "test_funcs.o").exists()]
+    return [
+        s for s in _KNOWN_SUBDIRS if s.startswith("cc") and (OBJ_DIR / s / "test_funcs.o").exists()
+    ]
 
 
 _c_variants = _discover_c_variants()
@@ -102,7 +105,7 @@ _MAP_FIXED_NOREPLACE = 0x100000
 # ---------------------------------------------------------------------------
 
 
-def _get_libc():
+def _get_libc() -> ctypes.CDLL:
     """Get a ctypes handle to libc with correct mmap/munmap signatures."""
     libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
     libc.mmap.restype = ctypes.c_void_p
@@ -122,7 +125,7 @@ def _get_libc():
 def _parse_maps() -> list[tuple[int, int]]:
     """Parse /proc/self/maps into sorted list of (start, end) tuples."""
     regions = []
-    with open("/proc/self/maps") as f:
+    with Path("/proc/self/maps").open() as f:
         for line in f:
             addrs = line.split()[0].split("-")
             regions.append((int(addrs[0], 16), int(addrs[1], 16)))

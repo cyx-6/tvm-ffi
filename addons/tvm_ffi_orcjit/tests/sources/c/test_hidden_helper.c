@@ -26,18 +26,17 @@
  *
  * Reference: LLVM issue #173269
  */
-#include <tvm/ffi/c_api.h>
 #include <stdint.h>
+#include <tvm/ffi/c_api.h>
 
 /* Hidden visibility: caller uses ADRP+ADD instead of GOT */
-__attribute__((visibility("hidden")))
-int64_t hidden_helper_add(int64_t a, int64_t b) {
-    return a + b;
+__attribute__((visibility("hidden"))) int64_t hidden_helper_add(int64_t a, int64_t b) {
+  return a + b;
 }
 
 /* Export a TVM FFI function that calls hidden_helper_add directly */
-TVM_FFI_DLL_EXPORT int __tvm_ffi_hidden_add(void* self, const TVMFFIAny* args,
-                                             int32_t num_args, TVMFFIAny* result) {
+TVM_FFI_DLL_EXPORT int __tvm_ffi_hidden_add(void* self, const TVMFFIAny* args, int32_t num_args,
+                                            TVMFFIAny* result) {
   result->type_index = kTVMFFIInt;
   result->zero_padding = 0;
   result->v_int64 = hidden_helper_add(args[0].v_int64, args[1].v_int64);
@@ -46,7 +45,7 @@ TVM_FFI_DLL_EXPORT int __tvm_ffi_hidden_add(void* self, const TVMFFIAny* args,
 
 /* Return the address of this function's code — for co-location tests */
 TVM_FFI_DLL_EXPORT int __tvm_ffi_helper_code_address(void* self, const TVMFFIAny* args,
-                                                      int32_t num_args, TVMFFIAny* result) {
+                                                     int32_t num_args, TVMFFIAny* result) {
   result->type_index = kTVMFFIInt;
   result->zero_padding = 0;
   result->v_int64 = (int64_t)(uintptr_t)&__tvm_ffi_helper_code_address;

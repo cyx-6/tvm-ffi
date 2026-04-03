@@ -22,7 +22,6 @@
  * \brief LLVM ORC JIT ExecutionSession implementation
  */
 
-#include "orcjit_arena_mm.h"
 #include "orcjit_session.h"
 
 #include <llvm/ADT/DenseMap.h>
@@ -46,6 +45,8 @@
 
 #include <cstddef>
 #include <cstring>
+
+#include "orcjit_arena_mm.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -461,9 +462,8 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
 #ifdef __linux__
   if (arena_size_bytes >= 0) {
     auto page_size = llvm::sys::Process::getPageSizeEstimate();
-    size_t capacity = arena_size_bytes > 0
-                          ? static_cast<size_t>(arena_size_bytes)
-                          : ArenaJITLinkMemoryManager::kDefaultArenaCapacity;
+    size_t capacity = arena_size_bytes > 0 ? static_cast<size_t>(arena_size_bytes)
+                                           : ArenaJITLinkMemoryManager::kDefaultArenaCapacity;
     arena_mm_ = std::make_unique<ArenaJITLinkMemoryManager>(page_size, capacity);
   }
 #endif
@@ -471,150 +471,149 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
   auto setup_builder = [this](llvm::orc::LLJITBuilder& builder) {
 #ifdef __linux__
     if (arena_mm_) {
-    builder.setObjectLinkingLayerCreator(
-        [this](llvm::orc::ExecutionSession& ES)
-            -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
-          auto OLL = std::make_unique<llvm::orc::ObjectLinkingLayer>(ES, *arena_mm_);
-          // Fix LLVM JITLink GOTPCRELX relaxation bug.
-          //
-          // optimizeGOTAndStubAccesses() relaxes `call *foo@GOTPCREL(%rip)` (ff 15)
-          // to `addr32 call foo` (67 e8) and sets the edge to Pointer32 (absolute
-          // 32-bit).  But `call rel32` is always PC-relative — the CPU computes
-          // target = RIP + imm32, not target = imm32.  The Pointer32 fixup writes
-          // the absolute address, producing a wrong displacement.
-          //
-          // This only manifests when external symbols resolve to low addresses
-          // (< 4 GB, e.g. PLT entries in a non-PIE executable) while JIT code is
-          // at high addresses (the arena at 0x7f...).  The optimization fires
-          // because isUInt<32>(target) is true, but the resulting fixup is wrong.
-          //
-          // Fix: a post-optimization PreFixupPass that reverts broken relaxations
-          // back to indirect calls through the GOT.
-          class GOTPCRELXFixPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
-           public:
-            void modifyPassConfig(llvm::orc::MaterializationResponsibility& MR,
-                                  llvm::jitlink::LinkGraph& G,
-                                  llvm::jitlink::PassConfiguration& Config) override {
-              Config.PreFixupPasses.emplace_back(fixBrokenGOTPCRELXRelaxation);
-            }
-            llvm::Error notifyFailed(llvm::orc::MaterializationResponsibility& MR) override {
-              return llvm::Error::success();
-            }
-            llvm::Error notifyRemovingResources(llvm::orc::JITDylib& JD,
-                                                llvm::orc::ResourceKey K) override {
-              return llvm::Error::success();
-            }
-            void notifyTransferringResources(llvm::orc::JITDylib& JD,
-                                             llvm::orc::ResourceKey DstKey,
-                                             llvm::orc::ResourceKey SrcKey) override {}
-
-            /*! \brief Correct broken GOTPCRELX relaxations produced by
-             *         optimizeGOTAndStubAccesses().
-             *
-             * LLVM JITLink relaxes `call *foo@GOTPCREL(%rip)` (ff 15) to
-             * `addr32 call foo` (67 e8) using a Pointer32 (absolute 32-bit)
-             * fixup.  But `call rel32` is PC-relative, so the fixup is wrong.
-             * See the detailed description in orcjit_arena_mm.h.
-             *
-             * Strategy:
-             *  1. Build a symbol → GOT-entry-block map for the graph.
-             *  2. For every Pointer32 edge whose preceding bytes are 67 e8
-             *     (relaxed call) or e9 (relaxed jmp):
-             *     - If the target is reachable via a signed 32-bit PC-relative
-             *       displacement, change the edge to BranchPCRel32.
-             *     - Otherwise revert the relaxation: restore the original
-             *       indirect-call/jmp opcode bytes (ff 15 / ff 25), retarget
-             *       the edge to the GOT entry, and use PCRel32 with addend 0
-             *       (JITLink normalises GOTPCRELX addends to 0).
-             */
-            static llvm::Error fixBrokenGOTPCRELXRelaxation(llvm::jitlink::LinkGraph& G) {
-              using namespace llvm::jitlink;
-              // Build a map: symbol → GOT entry block.
-              // GOT entries are pointer-sized blocks with exactly one Pointer64 edge.
-              llvm::DenseMap<Symbol*, Block*> SymToGOTEntry;
-              for (auto* B : G.blocks()) {
-                if (B->getSize() != G.getPointerSize()) continue;
-                if (B->edges_size() != 1) continue;
-                auto& E = *B->edges().begin();
-                if (E.getKind() == x86_64::Pointer64) {
-                  SymToGOTEntry[&E.getTarget()] = B;
-                }
+      builder.setObjectLinkingLayerCreator(
+          [this](llvm::orc::ExecutionSession& ES)
+              -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
+            auto OLL = std::make_unique<llvm::orc::ObjectLinkingLayer>(ES, *arena_mm_);
+            // Fix LLVM JITLink GOTPCRELX relaxation bug.
+            //
+            // optimizeGOTAndStubAccesses() relaxes `call *foo@GOTPCREL(%rip)` (ff 15)
+            // to `addr32 call foo` (67 e8) and sets the edge to Pointer32 (absolute
+            // 32-bit).  But `call rel32` is always PC-relative — the CPU computes
+            // target = RIP + imm32, not target = imm32.  The Pointer32 fixup writes
+            // the absolute address, producing a wrong displacement.
+            //
+            // This only manifests when external symbols resolve to low addresses
+            // (< 4 GB, e.g. PLT entries in a non-PIE executable) while JIT code is
+            // at high addresses (the arena at 0x7f...).  The optimization fires
+            // because isUInt<32>(target) is true, but the resulting fixup is wrong.
+            //
+            // Fix: a post-optimization PreFixupPass that reverts broken relaxations
+            // back to indirect calls through the GOT.
+            class GOTPCRELXFixPlugin : public llvm::orc::ObjectLinkingLayer::Plugin {
+             public:
+              void modifyPassConfig(llvm::orc::MaterializationResponsibility& MR,
+                                    llvm::jitlink::LinkGraph& G,
+                                    llvm::jitlink::PassConfiguration& Config) override {
+                Config.PreFixupPasses.emplace_back(fixBrokenGOTPCRELXRelaxation);
               }
+              llvm::Error notifyFailed(llvm::orc::MaterializationResponsibility& MR) override {
+                return llvm::Error::success();
+              }
+              llvm::Error notifyRemovingResources(llvm::orc::JITDylib& JD,
+                                                  llvm::orc::ResourceKey K) override {
+                return llvm::Error::success();
+              }
+              void notifyTransferringResources(llvm::orc::JITDylib& JD,
+                                               llvm::orc::ResourceKey DstKey,
+                                               llvm::orc::ResourceKey SrcKey) override {}
 
-              for (auto* B : G.blocks()) {
-                for (auto& E : B->edges()) {
-                  if (E.getKind() != x86_64::Pointer32) continue;
-                  if (E.getOffset() < 2) continue;
-
-                  auto* FixupData = reinterpret_cast<uint8_t*>(
-                      const_cast<char*>(B->getContent().data())) + E.getOffset();
-                  uint8_t Prev2 = FixupData[-2];
-                  uint8_t Prev1 = FixupData[-1];
-
-                  bool isRelaxedCall = (Prev2 == 0x67 && Prev1 == 0xe8);
-                  bool isRelaxedJmp = (Prev2 == 0xe9);
-                  if (!isRelaxedCall && !isRelaxedJmp) continue;
-
-                  // Check if PC-relative displacement would fit.
-                  auto TargetAddr = E.getTarget().getAddress();
-                  auto FixupAddr = B->getFixupAddress(E);
-                  int64_t Displacement = TargetAddr.getValue() -
-                                         (FixupAddr.getValue() + 4) +
-                                         E.getAddend();
-                  if (llvm::isInt<32>(Displacement)) {
-                    // Distance fits — just fix the edge kind to PC-relative.
-                    E.setKind(x86_64::BranchPCRel32);
-                    continue;
+              /*! \brief Correct broken GOTPCRELX relaxations produced by
+               *         optimizeGOTAndStubAccesses().
+               *
+               * LLVM JITLink relaxes `call *foo@GOTPCREL(%rip)` (ff 15) to
+               * `addr32 call foo` (67 e8) using a Pointer32 (absolute 32-bit)
+               * fixup.  But `call rel32` is PC-relative, so the fixup is wrong.
+               * See the detailed description in orcjit_arena_mm.h.
+               *
+               * Strategy:
+               *  1. Build a symbol → GOT-entry-block map for the graph.
+               *  2. For every Pointer32 edge whose preceding bytes are 67 e8
+               *     (relaxed call) or e9 (relaxed jmp):
+               *     - If the target is reachable via a signed 32-bit PC-relative
+               *       displacement, change the edge to BranchPCRel32.
+               *     - Otherwise revert the relaxation: restore the original
+               *       indirect-call/jmp opcode bytes (ff 15 / ff 25), retarget
+               *       the edge to the GOT entry, and use PCRel32 with addend 0
+               *       (JITLink normalises GOTPCRELX addends to 0).
+               */
+              static llvm::Error fixBrokenGOTPCRELXRelaxation(llvm::jitlink::LinkGraph& G) {
+                using namespace llvm::jitlink;
+                // Build a map: symbol → GOT entry block.
+                // GOT entries are pointer-sized blocks with exactly one Pointer64 edge.
+                llvm::DenseMap<Symbol*, Block*> SymToGOTEntry;
+                for (auto* B : G.blocks()) {
+                  if (B->getSize() != G.getPointerSize()) continue;
+                  if (B->edges_size() != 1) continue;
+                  auto& E = *B->edges().begin();
+                  if (E.getKind() == x86_64::Pointer64) {
+                    SymToGOTEntry[&E.getTarget()] = B;
                   }
+                }
 
-                  // Distance doesn't fit — revert to indirect call/jmp through GOT.
-                  auto It = SymToGOTEntry.find(&E.getTarget());
-                  if (It == SymToGOTEntry.end()) {
-                    return llvm::make_error<llvm::StringError>(
-                        "Cannot revert GOTPCRELX relaxation: no GOT entry for " +
-                        (E.getTarget().hasName()
-                             ? std::string(*E.getTarget().getName())
-                             : std::string("<anon>")),
-                        llvm::inconvertibleErrorCode());
-                  }
+                for (auto* B : G.blocks()) {
+                  for (auto& E : B->edges()) {
+                    if (E.getKind() != x86_64::Pointer32) continue;
+                    if (E.getOffset() < 2) continue;
 
-                  // Find the anonymous symbol covering the GOT entry block.
-                  Block* GOTBlock = It->second;
-                  Symbol* GOTSym = nullptr;
-                  for (auto* Sym : G.defined_symbols()) {
-                    if (&Sym->getBlock() == GOTBlock && Sym->getOffset() == 0) {
-                      GOTSym = Sym;
-                      break;
+                    auto* FixupData =
+                        reinterpret_cast<uint8_t*>(const_cast<char*>(B->getContent().data())) +
+                        E.getOffset();
+                    uint8_t Prev2 = FixupData[-2];
+                    uint8_t Prev1 = FixupData[-1];
+
+                    bool isRelaxedCall = (Prev2 == 0x67 && Prev1 == 0xe8);
+                    bool isRelaxedJmp = (Prev2 == 0xe9);
+                    if (!isRelaxedCall && !isRelaxedJmp) continue;
+
+                    // Check if PC-relative displacement would fit.
+                    auto TargetAddr = E.getTarget().getAddress();
+                    auto FixupAddr = B->getFixupAddress(E);
+                    int64_t Displacement =
+                        TargetAddr.getValue() - (FixupAddr.getValue() + 4) + E.getAddend();
+                    if (llvm::isInt<32>(Displacement)) {
+                      // Distance fits — just fix the edge kind to PC-relative.
+                      E.setKind(x86_64::BranchPCRel32);
+                      continue;
                     }
-                  }
-                  if (!GOTSym) {
-                    return llvm::make_error<llvm::StringError>(
-                        "Cannot revert GOTPCRELX relaxation: no symbol for GOT entry",
-                        llvm::inconvertibleErrorCode());
-                  }
 
-                  if (isRelaxedCall) {
-                    // Restore: 67 e8 → ff 15 (call *[rip+disp32])
-                    FixupData[-2] = 0xff;
-                    FixupData[-1] = 0x15;
-                  } else {
-                    // Restore: e9 XX XX XX XX 90 → ff 25 XX XX XX XX
-                    FixupData[-2] = 0xff;
-                    FixupData[-1] = 0x25;
-                    // For jmp, the optimization shifted offset by -1; shift back.
-                    E.setOffset(E.getOffset() + 1);
+                    // Distance doesn't fit — revert to indirect call/jmp through GOT.
+                    auto It = SymToGOTEntry.find(&E.getTarget());
+                    if (It == SymToGOTEntry.end()) {
+                      return llvm::make_error<llvm::StringError>(
+                          "Cannot revert GOTPCRELX relaxation: no GOT entry for " +
+                              (E.getTarget().hasName() ? std::string(*E.getTarget().getName())
+                                                       : std::string("<anon>")),
+                          llvm::inconvertibleErrorCode());
+                    }
+
+                    // Find the anonymous symbol covering the GOT entry block.
+                    Block* GOTBlock = It->second;
+                    Symbol* GOTSym = nullptr;
+                    for (auto* Sym : G.defined_symbols()) {
+                      if (&Sym->getBlock() == GOTBlock && Sym->getOffset() == 0) {
+                        GOTSym = Sym;
+                        break;
+                      }
+                    }
+                    if (!GOTSym) {
+                      return llvm::make_error<llvm::StringError>(
+                          "Cannot revert GOTPCRELX relaxation: no symbol for GOT entry",
+                          llvm::inconvertibleErrorCode());
+                    }
+
+                    if (isRelaxedCall) {
+                      // Restore: 67 e8 → ff 15 (call *[rip+disp32])
+                      FixupData[-2] = 0xff;
+                      FixupData[-1] = 0x15;
+                    } else {
+                      // Restore: e9 XX XX XX XX 90 → ff 25 XX XX XX XX
+                      FixupData[-2] = 0xff;
+                      FixupData[-1] = 0x25;
+                      // For jmp, the optimization shifted offset by -1; shift back.
+                      E.setOffset(E.getOffset() + 1);
+                    }
+                    E.setKind(x86_64::PCRel32);
+                    E.setTarget(*GOTSym);
+                    E.setAddend(0);
                   }
-                  E.setKind(x86_64::PCRel32);
-                  E.setTarget(*GOTSym);
-                  E.setAddend(0);
                 }
+                return llvm::Error::success();
               }
-              return llvm::Error::success();
-            }
-          };
-          OLL->addPlugin(std::make_unique<GOTPCRELXFixPlugin>());
-          return OLL;
-        });
+            };
+            OLL->addPlugin(std::make_unique<GOTPCRELXFixPlugin>());
+            return OLL;
+          });
     }  // if (arena_mm_)
 #elif defined(__APPLE__) || defined(_WIN32)
     // macOS: MachOPlatform (via ExecutorNativePlatform) requires ObjectLinkingLayer.

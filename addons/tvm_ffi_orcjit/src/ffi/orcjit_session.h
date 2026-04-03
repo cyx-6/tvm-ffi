@@ -30,12 +30,12 @@
 #include <tvm/ffi/object.h>
 #include <tvm/ffi/string.h>
 
-#include "orcjit_arena_mm.h"
-
 #include <atomic>
 #include <memory>
 #include <string>
 #include <unordered_map>
+
+#include "orcjit_arena_mm.h"
 
 namespace tvm {
 namespace ffi {

@@ -35,7 +35,9 @@
 #include <algorithm>
 #include <cstring>
 
+#ifndef _WIN32
 #include <sys/mman.h>
+#endif
 
 namespace tvm {
 namespace ffi {
@@ -85,8 +87,7 @@ void ArenaJITLinkMemoryManager::protectPages(void* addr, size_t size, MemProt Pr
 
 // ── ArenaInFlightAlloc ──────────────────────────────────────────────
 
-class ArenaJITLinkMemoryManager::ArenaInFlightAlloc
-    : public JITLinkMemoryManager::InFlightAlloc {
+class ArenaJITLinkMemoryManager::ArenaInFlightAlloc : public JITLinkMemoryManager::InFlightAlloc {
  public:
   ArenaInFlightAlloc(ArenaJITLinkMemoryManager& MM, LinkGraph& G, BasicLayout BL,
                      size_t arena_offset, size_t standard_size, size_t finalize_size)
@@ -168,12 +169,16 @@ class ArenaJITLinkMemoryManager::ArenaInFlightAlloc
 // ── ArenaJITLinkMemoryManager ───────────────────────────────────────
 
 ArenaJITLinkMemoryManager::ArenaJITLinkMemoryManager(uint64_t page_size, size_t arena_capacity)
-    : arena_base_(nullptr), arena_capacity_(arena_capacity), page_size_(page_size), bump_offset_(0) {
+    : arena_base_(nullptr),
+      arena_capacity_(arena_capacity),
+      page_size_(page_size),
+      bump_offset_(0) {
   arena_base_ = static_cast<char*>(reserveVA(arena_capacity_));
   if (!arena_base_) {
     // Fatal: cannot reserve arena. This should not happen on 64-bit systems.
     llvm::report_fatal_error("ArenaJITLinkMemoryManager: failed to reserve " +
-                             Twine(arena_capacity_ / (1024 * 1024)) + " MB of virtual address space");
+                             Twine(arena_capacity_ / (1024 * 1024)) +
+                             " MB of virtual address space");
   }
 }
 
@@ -210,11 +215,11 @@ Expected<size_t> ArenaJITLinkMemoryManager::bumpAllocate(size_t size) {
 
   // Bump allocate.
   if (bump_offset_ + size > arena_capacity_) {
-    return make_error<StringError>(
-        "ArenaJITLinkMemoryManager: arena exhausted (used " +
-            formatv("{0:x}", bump_offset_) + " + requested " + formatv("{0:x}", size) +
-            " > capacity " + formatv("{0:x}", arena_capacity_) + ")",
-        inconvertibleErrorCode());
+    return make_error<StringError>("ArenaJITLinkMemoryManager: arena exhausted (used " +
+                                       formatv("{0:x}", bump_offset_) + " + requested " +
+                                       formatv("{0:x}", size) + " > capacity " +
+                                       formatv("{0:x}", arena_capacity_) + ")",
+                                   inconvertibleErrorCode());
   }
 
   size_t offset = bump_offset_;
@@ -228,7 +233,7 @@ void ArenaJITLinkMemoryManager::freeRegion(size_t offset, size_t size) {
 
   // Insert into free list in sorted order.
   auto it = std::lower_bound(free_list_.begin(), free_list_.end(), offset,
-                              [](const FreeBlock& fb, size_t off) { return fb.offset < off; });
+                             [](const FreeBlock& fb, size_t off) { return fb.offset < off; });
   it = free_list_.insert(it, FreeBlock{offset, size});
 
   // Coalesce with next.
@@ -298,8 +303,8 @@ void ArenaJITLinkMemoryManager::allocate(const JITLinkDylib* JD, LinkGraph& G,
     auto& AG = KV.first;
     auto& Seg = KV.second;
 
-    auto& SegAddr = (AG.getMemLifetime() == MemLifetime::Standard) ? NextStandardSegAddr
-                                                                   : NextFinalizeSegAddr;
+    auto& SegAddr =
+        (AG.getMemLifetime() == MemLifetime::Standard) ? NextStandardSegAddr : NextFinalizeSegAddr;
 
     Seg.WorkingMem = SegAddr.toPtr<char*>();
     Seg.Addr = SegAddr;

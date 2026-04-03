@@ -29,12 +29,11 @@
  * The arena memory manager fixes this by placing all objects
  * in contiguous VA space (<< 4GB).
  */
-#include <tvm/ffi/c_api.h>
 #include <stdint.h>
+#include <tvm/ffi/c_api.h>
 
 /* Same hidden declaration — compiler uses ADRP+ADD to take address */
-__attribute__((visibility("hidden")))
-extern int64_t hidden_helper_add(int64_t a, int64_t b);
+__attribute__((visibility("hidden"))) extern int64_t hidden_helper_add(int64_t a, int64_t b);
 
 typedef int64_t (*binop_t)(int64_t, int64_t);
 
@@ -44,7 +43,7 @@ typedef int64_t (*binop_t)(int64_t, int64_t);
      ADD  x0, x0, hidden_helper_add@PAGEOFF (R_AARCH64_ADD_ABS_LO12_NC)
    When hidden_helper_add is in a different allocation >4GB away, ADRP overflows. */
 TVM_FFI_DLL_EXPORT int __tvm_ffi_call_hidden_add(void* self, const TVMFFIAny* args,
-                                                  int32_t num_args, TVMFFIAny* result) {
+                                                 int32_t num_args, TVMFFIAny* result) {
   volatile binop_t fn = &hidden_helper_add;
   result->type_index = kTVMFFIInt;
   result->zero_padding = 0;
@@ -54,7 +53,7 @@ TVM_FFI_DLL_EXPORT int __tvm_ffi_call_hidden_add(void* self, const TVMFFIAny* ar
 
 /* Return the address of this function's code — for co-location tests */
 TVM_FFI_DLL_EXPORT int __tvm_ffi_caller_code_address(void* self, const TVMFFIAny* args,
-                                                      int32_t num_args, TVMFFIAny* result) {
+                                                     int32_t num_args, TVMFFIAny* result) {
   result->type_index = kTVMFFIInt;
   result->zero_padding = 0;
   result->v_int64 = (int64_t)(uintptr_t)&__tvm_ffi_caller_code_address;
