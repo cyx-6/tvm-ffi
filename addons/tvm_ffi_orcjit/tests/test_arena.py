@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import platform
 import sys
 from pathlib import Path
 
@@ -55,6 +56,7 @@ _KNOWN_SUBDIRS = [
     "c-gcc",
     "cc",
     "cc-gcc",
+    "cc-gcc-nopic",
     "c-appleclang",
     "cc-appleclang",
     "c-msvc",
@@ -86,15 +88,23 @@ def _discover_cpp_variants() -> list[str]:
     ]
 
 
+def _discover_nopic_cpp_variants() -> list[str]:
+    """Discover available non-PIC C++ compiler variants (for PC32 overflow tests)."""
+    return [s for s in _KNOWN_SUBDIRS if "nopic" in s and (OBJ_DIR / s / "test_funcs.o").exists()]
+
+
 _c_variants = _discover_c_variants()
 _cpp_variants = _discover_cpp_variants()
+_nopic_cpp_variants = _discover_nopic_cpp_variants()
 _all_variants = _c_variants + _cpp_variants
 
 _is_linux = sys.platform == "linux"
+_is_x86_64 = platform.machine() in ("x86_64", "AMD64")
 
 # Arena test parameters
 _ARENA_SIZE = 16 * 1024 * 1024  # 16MB — small arena for testing
 _BLOCK_RADIUS = 256 * 1024 * 1024  # 256MB — safe for CI containers
+_DSO_BLOCK_RADIUS = 3 * 1024 * 1024 * 1024  # 3GB — needed to overflow PC32 (±2GB)
 
 _PROT_NONE = 0
 _MAP_PRIVATE_ANON = 0x22  # MAP_PRIVATE | MAP_ANONYMOUS
@@ -369,3 +379,76 @@ def test_dso_handle_relocation_after_failed_materialization(variant: str) -> Non
     lib2 = session.create_library("lib2")
     lib2.add(obj(f"{variant}/test_funcs_conflict"))
     assert lib2.get_function("test_add")(10, 20) == 1030
+
+
+# ---------------------------------------------------------------------------
+# Test 6: __dso_handle PC32 overflow — arena prevents it (x86_64 only)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _is_linux, reason="Arena is Linux-only")
+@pytest.mark.skipif(not _is_x86_64, reason="PC32 overflow requires x86_64")
+@pytest.mark.skipif(not _nopic_cpp_variants, reason="No non-PIC C++ variants built")
+@pytest.mark.parametrize("variant", _nopic_cpp_variants or ["skip"])
+def test_dso_handle_pc32_with_arena(variant: str) -> None:
+    """Arena prevents __dso_handle PC32 overflow under VA pressure.
+
+    Non-PIC GCC objects use R_X86_64_PC32 for __dso_handle (±2GB range),
+    unlike -fPIC objects which use R_X86_64_GOTPCRELX (GOT-relative,
+    always in range).  A 3GB VA blocker pushes the second object's code
+    >2GB from __dso_handle (materialized with the first object).
+    Without arena this overflows; with arena all allocations stay within
+    the 256MB region.
+    """
+    maps_before = set(_parse_maps())
+
+    session = ExecutionSession(arena_size=_ARENA_SIZE)
+    lib1 = session.create_library("lib1")
+    lib1.add(obj(f"{variant}/test_funcs"))
+    assert lib1.get_function("test_add")(10, 20) == 30
+
+    # Block 3GB of VA around the first allocation to force scatter
+    maps_after = _parse_maps()
+    new_maps = _find_new_mappings(maps_before, maps_after)
+    jit_center = max(s for s, e in new_maps) if new_maps else 0xFFFF00000000
+
+    blockers = block_nearby_va(jit_center, radius=_DSO_BLOCK_RADIUS)
+    try:
+        lib2 = session.create_library("lib2")
+        lib2.add(obj(f"{variant}/test_funcs_conflict"))
+        assert lib2.get_function("test_add")(10, 20) == 1030
+    finally:
+        free_blockers(blockers)
+
+
+@pytest.mark.skipif(not _is_linux, reason="Arena is Linux-only")
+@pytest.mark.skipif(not _is_x86_64, reason="PC32 overflow requires x86_64")
+@pytest.mark.skipif(not _nopic_cpp_variants, reason="No non-PIC C++ variants built")
+@pytest.mark.parametrize("variant", _nopic_cpp_variants or ["skip"])
+def test_dso_handle_pc32_overflow_without_arena(variant: str) -> None:
+    """Without arena, non-PIC __dso_handle PC32 overflows under VA pressure.
+
+    Same setup as test_dso_handle_pc32_with_arena but with arena disabled.
+    The 3GB VA blocker pushes the second library's code >2GB from
+    __dso_handle, causing R_X86_64_PC32 relocation overflow — JITLink
+    reports a fixup-out-of-range error.
+    """
+    maps_before = set(_parse_maps())
+
+    session = ExecutionSession(arena_size=-1)  # arena disabled
+    lib1 = session.create_library("lib1")
+    lib1.add(obj(f"{variant}/test_funcs"))
+    assert lib1.get_function("test_add")(10, 20) == 30
+
+    maps_after = _parse_maps()
+    new_maps = _find_new_mappings(maps_before, maps_after)
+    jit_center = max(s for s, e in new_maps) if new_maps else 0xFFFF00000000
+
+    blockers = block_nearby_va(jit_center, radius=_DSO_BLOCK_RADIUS)
+    try:
+        with pytest.raises(Exception):
+            lib2 = session.create_library("lib2")
+            lib2.add(obj(f"{variant}/test_funcs_conflict"))
+            lib2.get_function("test_add")(10, 20)
+    finally:
+        free_blockers(blockers)
