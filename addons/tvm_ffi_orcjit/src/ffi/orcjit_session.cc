@@ -444,11 +444,14 @@ class DLLImportDefinitionGenerator : public llvm::orc::DefinitionGenerator {
 };
 #endif  // _WIN32
 
-ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_path)
+ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_path,
+                                                     int64_t arena_size_bytes)
     : jit_(nullptr) {
   // Create arena memory manager — pre-reserves contiguous VA region so all
   // JIT allocations stay within PC-relative relocation range (±2GB x86_64,
   // ±4GB AArch64).  Eliminates scattered-mmap relocation overflow (LLVM #173269).
+  //
+  // arena_size_bytes: 0 = default (256MB), >0 = custom size, <0 = disable arena.
   //
   // LLJIT auto-configures ObjectLinkingLayer (JITLink) on x86_64 and aarch64
   // Linux (see LLJITBuilderState::prepareForConstruction).  We override
@@ -456,12 +459,18 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
   // macOS MachOPlatform teardown crashes with the arena; Windows needs
   // further testing.
 #ifdef __linux__
-  auto page_size = llvm::sys::Process::getPageSizeEstimate();
-  arena_mm_ = std::make_unique<ArenaJITLinkMemoryManager>(page_size);
+  if (arena_size_bytes >= 0) {
+    auto page_size = llvm::sys::Process::getPageSizeEstimate();
+    size_t capacity = arena_size_bytes > 0
+                          ? static_cast<size_t>(arena_size_bytes)
+                          : ArenaJITLinkMemoryManager::kDefaultArenaCapacity;
+    arena_mm_ = std::make_unique<ArenaJITLinkMemoryManager>(page_size, capacity);
+  }
 #endif
 
   auto setup_builder = [this](llvm::orc::LLJITBuilder& builder) {
 #ifdef __linux__
+    if (arena_mm_) {
     builder.setObjectLinkingLayerCreator(
         [this](llvm::orc::ExecutionSession& ES)
             -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
@@ -606,6 +615,7 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
           OLL->addPlugin(std::make_unique<GOTPCRELXFixPlugin>());
           return OLL;
         });
+    }  // if (arena_mm_)
 #elif defined(__APPLE__) || defined(_WIN32)
     // macOS: MachOPlatform (via ExecutorNativePlatform) requires ObjectLinkingLayer.
     // Windows: need ObjectLinkingLayer for InitFiniPlugin and DLLImportDefinitionGenerator.
@@ -756,8 +766,10 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const std::string& orc_rt_p
 #endif
 }
 
-ORCJITExecutionSession::ORCJITExecutionSession(const std::string& orc_rt_path) {
-  ObjectPtr<ORCJITExecutionSessionObj> obj = make_object<ORCJITExecutionSessionObj>(orc_rt_path);
+ORCJITExecutionSession::ORCJITExecutionSession(const std::string& orc_rt_path,
+                                               int64_t arena_size_bytes) {
+  ObjectPtr<ORCJITExecutionSessionObj> obj =
+      make_object<ORCJITExecutionSessionObj>(orc_rt_path, arena_size_bytes);
   data_ = std::move(obj);
 }
 

@@ -43,3 +43,12 @@ TVM_FFI_DLL_EXPORT int __tvm_ffi_hidden_add(void* self, const TVMFFIAny* args,
   result->v_int64 = hidden_helper_add(args[0].v_int64, args[1].v_int64);
   return 0;
 }
+
+/* Return the address of this function's code — for co-location tests */
+TVM_FFI_DLL_EXPORT int __tvm_ffi_helper_code_address(void* self, const TVMFFIAny* args,
+                                                      int32_t num_args, TVMFFIAny* result) {
+  result->type_index = kTVMFFIInt;
+  result->zero_padding = 0;
+  result->v_int64 = (int64_t)(uintptr_t)&__tvm_ffi_helper_code_address;
+  return 0;
+}

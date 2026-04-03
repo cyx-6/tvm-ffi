@@ -35,14 +35,7 @@
 #include <algorithm>
 #include <cstring>
 
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
 #include <sys/mman.h>
-#endif
 
 namespace tvm {
 namespace ffi {
@@ -53,47 +46,6 @@ using namespace llvm::jitlink;
 using namespace llvm::orc;
 
 // ── Platform abstraction ────────────────────────────────────────────
-
-#ifdef _WIN32
-
-void* ArenaJITLinkMemoryManager::reserveVA(size_t size) {
-  void* p = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS);
-  return p;
-}
-
-void ArenaJITLinkMemoryManager::releaseVA(void* addr, size_t size) {
-  VirtualFree(addr, 0, MEM_RELEASE);
-}
-
-void ArenaJITLinkMemoryManager::commitPages(void* addr, size_t size) {
-  VirtualAlloc(addr, size, MEM_COMMIT, PAGE_READWRITE);
-}
-
-void ArenaJITLinkMemoryManager::decommitPages(void* addr, size_t size) {
-  VirtualFree(addr, size, MEM_DECOMMIT);
-}
-
-void ArenaJITLinkMemoryManager::protectPages(void* addr, size_t size, MemProt Prot) {
-  DWORD prot = PAGE_NOACCESS;
-  bool has_exec = (Prot & MemProt::Exec) != MemProt::None;
-  bool has_write = (Prot & MemProt::Write) != MemProt::None;
-  bool has_read = (Prot & MemProt::Read) != MemProt::None;
-  if (has_exec && has_write)
-    prot = PAGE_EXECUTE_READWRITE;
-  else if (has_exec && has_read)
-    prot = PAGE_EXECUTE_READ;
-  else if (has_exec)
-    prot = PAGE_EXECUTE;
-  else if (has_write)
-    prot = PAGE_READWRITE;
-  else if (has_read)
-    prot = PAGE_READONLY;
-  DWORD old;
-  VirtualProtect(addr, size, prot, &old);
-  if (has_exec) FlushInstructionCache(GetCurrentProcess(), addr, size);
-}
-
-#else  // Unix (Linux, macOS)
 
 void* ArenaJITLinkMemoryManager::reserveVA(size_t size) {
   void* p = ::mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -130,8 +82,6 @@ void ArenaJITLinkMemoryManager::protectPages(void* addr, size_t size, MemProt Pr
     sys::Memory::InvalidateInstructionCache(addr, size);
   }
 }
-
-#endif  // _WIN32
 
 // ── ArenaInFlightAlloc ──────────────────────────────────────────────
 

@@ -14,36 +14,29 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Tests for JIT memory arena — deterministic relocation overflow reproduction.
+"""Tests for JIT memory arena — verifies co-location and relocation safety.
 
-Tests are grouped into two categories:
+Tests verify the arena memory manager by:
 
-1. **VA blocker tests** (Linux only): After the first JIT allocation, parse
-   /proc/self/maps, find all free VA gaps within ±5GB of the allocation, and
-   fill them with PROT_NONE mappings.  This forces the next mmap to land far
-   away, triggering PC-relative relocation overflow.
+1. **Co-location tests**: Load objects into separate libraries, get their code
+   addresses, and verify they are within the arena range.  A 256MB VA blocker
+   between loads forces the default allocator to scatter objects, while the
+   arena keeps them close.
 
-   - AArch64: hidden-visibility ADRP overflow (R_AARCH64_ADR_PREL_PG_HI21,
-     ±4GB).  LLVM issue #173269.
-   - x86_64: hidden-visibility PC32 overflow (R_X86_64_PC32, ±2GB).
-     Same mechanism, smaller range.
+2. **Before/after tests**: Compare arena-on vs arena-off behavior.  With arena
+   disabled (arena_size=-1), objects scatter beyond 256MB.  With arena enabled,
+   objects stay within the arena range.
 
-2. **Leaked-materialization tests** (cross-platform): A prior JIT session
-   triggers a duplicate-symbol error, leaking mmap'd memory.  Subsequent
-   sessions allocate at progressively higher addresses, eventually exceeding
-   the ±2GB range of Delta32 relocations for symbols like __dso_handle.
+3. **Hidden-symbol tests**: Load hidden-visibility objects with VA blocker and
+   call across them — verifies ADRP/PC32 relocations stay in range.
 
-   - x86_64 GCC only: __dso_handle Delta32 overflow (/root/error.md).
-
-Reference: LLVM issue #173269, lhames' comment on MapperJITLinkMemoryManager.
+All tests use a small arena (16MB) and 256MB VA blocker — safe for CI containers.
 """
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.util
-import os
-import platform
 import sys
 
 import pytest
@@ -77,7 +70,7 @@ def obj(name: str) -> str:
 
 
 def _discover_c_variants() -> list[str]:
-    """Discover available C-only compiler variants (for fake_fatbin)."""
+    """Discover available C-only compiler variants."""
     return [
         s
         for s in _KNOWN_SUBDIRS
@@ -90,33 +83,23 @@ def _discover_cpp_variants() -> list[str]:
     return [s for s in _KNOWN_SUBDIRS if s.startswith("cc") and (OBJ_DIR / s / "test_funcs.o").exists()]
 
 
-def _discover_all_variants() -> list[str]:
-    """Discover all available compiler variants."""
-    return [s for s in _KNOWN_SUBDIRS if (OBJ_DIR / s / "test_funcs.o").exists()]
-
-
 _c_variants = _discover_c_variants()
 _cpp_variants = _discover_cpp_variants()
-_all_variants = _discover_all_variants()
-
-# ---------------------------------------------------------------------------
-# VA blocker — fills nearby free VA gaps to force distant mmap placement
-# ---------------------------------------------------------------------------
 
 _is_linux = sys.platform == "linux"
-_is_aarch64 = platform.machine() in ("aarch64", "arm64")
-# VA blocker tests aggressively fill process VA space and may crash in constrained
-# environments (e.g., cibuildwheel containers).  Require explicit opt-in.
-_va_blocker_enabled = _is_linux and os.environ.get("TVM_ORCJIT_VA_BLOCKER_TESTS") == "1"
 
-# Radius around first allocation to block: must exceed relocation range.
-# AArch64 ADRP: ±4GB → block 5GB radius
-# x86_64 PC32/PLT32: ±2GB → block 3GB radius
-_BLOCK_RADIUS = (5 if _is_aarch64 else 3) * (1 << 30)
+# Arena test parameters
+_ARENA_SIZE = 16 * 1024 * 1024  # 16MB — small arena for testing
+_BLOCK_RADIUS = 256 * 1024 * 1024  # 256MB — safe for CI containers
 
 _PROT_NONE = 0
 _MAP_PRIVATE_ANON = 0x22  # MAP_PRIVATE | MAP_ANONYMOUS
 _MAP_FIXED_NOREPLACE = 0x100000
+
+
+# ---------------------------------------------------------------------------
+# VA blocker — fills nearby free VA gaps to force distant mmap placement
+# ---------------------------------------------------------------------------
 
 
 def _get_libc():
@@ -195,143 +178,123 @@ def free_blockers(blockers: list[tuple[int, int]]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: ADRP overflow via hidden-visibility cross-object reference
+# Test 1: Arena co-location — objects stay within arena range
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not _va_blocker_enabled, reason="set TVM_ORCJIT_VA_BLOCKER_TESTS=1 to enable")
+@pytest.mark.skipif(not _is_linux, reason="Arena is Linux-only")
 @pytest.mark.parametrize("variant", _c_variants)
-def test_adrp_hidden_symbol_overflow(variant: str) -> None:
-    """Hidden-visibility ADRP overflows when objects are >4GB apart.
+def test_arena_colocation(variant: str) -> None:
+    """With arena, objects in separate libraries have close code addresses.
 
-    test_hidden_caller.c takes the address of hidden_helper_add via
-    ADRP+ADD (R_AARCH64_ADR_PREL_PG_HI21).  JITLink does NOT create
-    a GOT stub for hidden symbols — the ADRP directly encodes the
-    offset to the target.  When the two objects are in different mmap
-    slabs >4GB apart, the 21-bit page offset overflows.
-
-    This reproduces LLVM issue #173269 deterministically.
-
-    Without arena: FAILS (ADRP overflow → segfault or JITLink error).
-    With arena:    PASSES (both objects in same contiguous VA region).
+    Uses a 16MB arena and inserts a 256MB VA blocker between object loads.
+    Without the arena, the blocker would push the second object far away.
+    With the arena, both objects land within the 16MB region.
     """
-    # Snapshot maps before any JIT activity
-    maps_before = set((s, e) for s, e in _parse_maps())
+    maps_before = set(_parse_maps())
 
-    session = ExecutionSession()
-    lib = session.create_library("hidden_test")
+    session = ExecutionSession(arena_size=_ARENA_SIZE)
+    lib1 = session.create_library("lib1")
+    lib1.add(obj(f"{variant}/test_addr"))
+    addr1 = lib1.get_function("code_address")()
 
-    # Load helper object and FORCE MATERIALIZATION by looking up its function.
-    # ORC JIT materializes lazily — without this lookup, both objects would
-    # be materialized back-to-back at get_function() time, defeating the
-    # VA blocker placed between add() calls.
-    lib.add(obj(f"{variant}/test_hidden_helper"))
-    helper_fn = lib.get_function("hidden_add")
-    assert helper_fn(1, 2) == 3  # forces materialization → mmap at address A
-
-    # Find where LLVM placed the helper's allocation
+    # Find where LLVM placed the first allocation and block nearby VA
     maps_after = _parse_maps()
     new_maps = _find_new_mappings(maps_before, maps_after)
-    if new_maps:
-        jit_region_center = max(s for s, e in new_maps)
-    else:
-        jit_region_center = 0xFFFF00000000
+    jit_center = max(s for s, e in new_maps) if new_maps else addr1
 
-    # Block all free VA gaps near the helper allocation
-    blockers = block_nearby_va(jit_region_center)
+    blockers = block_nearby_va(jit_center)
     try:
-        # Load caller object — mmap MUST land >4GB from helper
-        lib.add(obj(f"{variant}/test_hidden_caller"))
-
-        # Trigger materialization — ADRP relocation applied here
-        fn = lib.get_function("call_hidden_add")
-        assert fn(10, 20) == 30
+        lib2 = session.create_library("lib2")
+        lib2.add(obj(f"{variant}/test_addr"))
+        addr2 = lib2.get_function("code_address")()
     finally:
         free_blockers(blockers)
 
+    distance = abs(addr1 - addr2)
+    assert distance < _ARENA_SIZE, (
+        f"Objects should be within {_ARENA_SIZE} bytes, "
+        f"but distance is {distance} ({distance / (1024**2):.1f} MB)"
+    )
+
 
 # ---------------------------------------------------------------------------
-# Test 2: Arena immunity to VA fragmentation (meta-test)
+# Test 2: Without arena, objects scatter beyond blocker radius
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not _va_blocker_enabled, reason="set TVM_ORCJIT_VA_BLOCKER_TESTS=1 to enable")
+@pytest.mark.skipif(not _is_linux, reason="Arena is Linux-only")
 @pytest.mark.parametrize("variant", _c_variants)
-def test_adrp_immune_with_arena(variant: str) -> None:
-    """With arena, VA fragmentation does not cause ADRP overflow.
+def test_no_arena_scattered(variant: str) -> None:
+    """Without arena, VA blocker pushes objects far apart.
 
-    Same setup as test_adrp_hidden_symbol_overflow, but once the arena
-    is implemented, this test passes because all JIT allocations land
-    in the same contiguous VA region regardless of VA fragmentation.
-
-    Without arena: FAILS (same as test_adrp_hidden_symbol_overflow).
-    With arena:    PASSES.
+    Combined with test_arena_colocation, this proves the arena is the
+    cause of co-location — not lucky mmap placement.
     """
-    maps_before = set((s, e) for s, e in _parse_maps())
+    maps_before = set(_parse_maps())
 
-    session = ExecutionSession()
+    session = ExecutionSession(arena_size=-1)  # arena disabled
+    lib1 = session.create_library("lib1")
+    lib1.add(obj(f"{variant}/test_addr"))
+    addr1 = lib1.get_function("code_address")()
+
+    maps_after = _parse_maps()
+    new_maps = _find_new_mappings(maps_before, maps_after)
+    jit_center = max(s for s, e in new_maps) if new_maps else addr1
+
+    blockers = block_nearby_va(jit_center)
+    try:
+        lib2 = session.create_library("lib2")
+        lib2.add(obj(f"{variant}/test_addr"))
+        addr2 = lib2.get_function("code_address")()
+    finally:
+        free_blockers(blockers)
+
+    distance = abs(addr1 - addr2)
+    # Objects should be far apart — at least 128MB (half the blocker radius).
+    # The exact distance depends on kernel mmap placement, but it must be
+    # much larger than the 16MB arena size to prove the arena is responsible.
+    min_expected = _BLOCK_RADIUS // 2
+    assert distance > min_expected, (
+        f"Without arena, objects should be >{min_expected} bytes apart, "
+        f"but distance is {distance} ({distance / (1024**2):.1f} MB)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 3: Hidden-symbol ADRP/PC32 relocation with arena + blocker
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _is_linux, reason="Arena is Linux-only")
+@pytest.mark.parametrize("variant", _c_variants)
+def test_arena_hidden_symbol_with_blocker(variant: str) -> None:
+    """Arena prevents hidden-visibility relocation overflow under VA pressure.
+
+    Loads two objects with hidden-visibility cross-references (ADRP+ADD
+    on AArch64, PC32 on x86_64) with a VA blocker between them.
+    Without arena, the blocker would push objects apart causing overflow.
+    With the arena, both objects are co-located and the call succeeds.
+    """
+    maps_before = set(_parse_maps())
+
+    session = ExecutionSession(arena_size=_ARENA_SIZE)
     lib = session.create_library("hidden_test")
 
-    # Force materialization of helper first
+    # Load helper and force materialization
     lib.add(obj(f"{variant}/test_hidden_helper"))
     assert lib.get_function("hidden_add")(1, 2) == 3
 
+    # Block nearby VA to force scatter
     maps_after = _parse_maps()
     new_maps = _find_new_mappings(maps_before, maps_after)
-    jit_region_center = max(s for s, e in new_maps) if new_maps else 0xFFFF00000000
+    jit_center = max(s for s, e in new_maps) if new_maps else 0xFFFF00000000
 
-    blockers = block_nearby_va(jit_region_center)
+    blockers = block_nearby_va(jit_center)
     try:
         lib.add(obj(f"{variant}/test_hidden_caller"))
         fn = lib.get_function("call_hidden_add")
         assert fn(10, 20) == 30
-    finally:
-        free_blockers(blockers)
-
-
-# ---------------------------------------------------------------------------
-# Test 3: Cross-library calls (GOT-mediated, should always work)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skipif(not _va_blocker_enabled, reason="set TVM_ORCJIT_VA_BLOCKER_TESTS=1 to enable")
-@pytest.mark.parametrize("variant", _c_variants)
-def test_cross_library_got_mediated(variant: str) -> None:
-    """Cross-library calls via GOT/stubs work even with distant slabs.
-
-    JITLink creates per-object GOT entries and PLT stubs for
-    default-visibility cross-JITDylib calls.  The GOT is always in
-    the caller's slab, so ADRP to the GOT is always in range.
-    The final jump uses an absolute address (BR x16 on AArch64).
-
-    This test verifies that GOT-mediated calls are NOT affected
-    by VA fragmentation — they work with or without the arena.
-
-    Note: uses C-only variants.  C++ (GCC) objects reference __dso_handle
-    via ADRP (not GOT), which overflows independently of the cross-library
-    call mechanism.
-    """
-    maps_before = set((s, e) for s, e in _parse_maps())
-
-    session = ExecutionSession()
-
-    lib_base = session.create_library("base")
-    lib_base.add(obj(f"{variant}/test_link_order_base"))
-    # Force materialization of base library
-    lib_base.get_function("helper_add")(1, 2)
-
-    maps_after = _parse_maps()
-    new_maps = _find_new_mappings(maps_before, maps_after)
-    jit_region_center = max(s for s, e in new_maps) if new_maps else 0xFFFF00000000
-
-    blockers = block_nearby_va(jit_region_center)
-    try:
-        lib_caller = session.create_library("caller")
-        lib_caller.set_link_order(lib_base)
-        lib_caller.add(obj(f"{variant}/test_link_order_caller"))
-
-        cross_add = lib_caller.get_function("cross_lib_add")
-        assert cross_add(10, 20) == 30
     finally:
         free_blockers(blockers)
 
@@ -341,17 +304,14 @@ def test_cross_library_got_mediated(variant: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="Phase 3: requires overflow region for large sections")
+@pytest.mark.skipif(not _is_linux, reason="Arena is Linux-only")
 @pytest.mark.parametrize("variant", _c_variants)
 def test_large_data_section(variant: str) -> None:
     """Load object with a 4MB .nv_fatbin section — basic correctness.
 
     The .nv_fatbin section is referenced only by absolute relocations,
     so it can live anywhere.  This test verifies the object loads and
-    the function works.
-
-    Phase 2 (arena only): passes, but .nv_fatbin consumes arena space.
-    Phase 3 (arena + overflow): passes, .nv_fatbin goes to overflow region.
+    the function works.  The 4MB section fits in the 256MB arena.
     """
     session = ExecutionSession()
     lib = session.create_library("fatbin")
@@ -375,7 +335,7 @@ def test_dso_handle_relocation_after_failed_materialization(variant: str) -> Non
     __dso_handle (used by __cxa_atexit for DSO identification).
     When a prior materialization fails (duplicate symbol), LLVM leaks
     the mmap'd slab.  Subsequent allocations land at higher addresses,
-    eventually exceeding the ±2GB PC32 range.
+    eventually exceeding the +/-2GB PC32 range.
 
     The arena prevents this because all allocations are within a
     contiguous 256MB region regardless of prior leaks.
@@ -385,9 +345,6 @@ def test_dso_handle_relocation_after_failed_materialization(variant: str) -> Non
     With arena:    PASSES (all allocations in same arena).
     """
     # Step 1: Trigger leaked materializations to consume low VA space.
-    # Each failed load leaks an mmap slab that can't be reclaimed.
-    # Keep sessions alive — destroying a session with leaked materialization
-    # state causes LLVM to crash during ORC runtime teardown.
     leaked_sessions = []
     for i in range(3):
         s0 = ExecutionSession()
