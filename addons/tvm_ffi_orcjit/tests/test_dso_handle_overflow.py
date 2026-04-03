@@ -124,11 +124,7 @@ def obj(name: str) -> str:
 
 
 def _discover_cpp_gcc_variants() -> list[str]:
-    return [
-        s
-        for s in ["cc-gcc"]
-        if (OBJ_DIR / s / "test_funcs.o").exists()
-    ]
+    return [s for s in ["cc-gcc"] if (OBJ_DIR / s / "test_funcs.o").exists()]
 
 
 _cpp_gcc_variants = _discover_cpp_gcc_variants()
