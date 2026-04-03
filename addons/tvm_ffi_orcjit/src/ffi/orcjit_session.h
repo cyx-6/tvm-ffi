@@ -30,7 +30,10 @@
 #include <tvm/ffi/object.h>
 #include <tvm/ffi/string.h>
 
+#include "orcjit_arena_mm.h"
+
 #include <atomic>
+#include <memory>
 #include <string>
 #include <unordered_map>
 
@@ -95,6 +98,8 @@ class ORCJITExecutionSessionObj : public Object {
   void AddPendingDeinitializer(llvm::orc::JITDylib* jd, const InitFiniEntry& entry);
 
  private:
+  /*! \brief Arena memory manager — must be declared before jit_ for destruction order */
+  std::unique_ptr<ArenaJITLinkMemoryManager> arena_mm_;
   /*! \brief The LLVM ORC JIT instance */
   std::unique_ptr<llvm::orc::LLJIT> jit_;
 
