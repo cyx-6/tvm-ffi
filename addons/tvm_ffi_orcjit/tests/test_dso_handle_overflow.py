@@ -16,23 +16,21 @@
 # under the License.
 """Reproducer for __dso_handle Delta32 relocation overflow on x86_64.
 
-GCC-compiled C++ objects reference __dso_handle via R_X86_64_PC32 (hidden
-visibility, direct PC-relative).  ELFNixPlatform defines __dso_handle via a
-separate DSOHandleMaterializationUnit whose allocation can land >2GB from
-JIT code when:
+GCC-compiled C++ objects built with -fpie reference __dso_handle via
+R_X86_64_PC32 (hidden visibility, direct PC-relative, ±2GB range).
+ELFNixPlatform defines __dso_handle via a separate
+DSOHandleMaterializationUnit whose allocation can land >2GB from
+JIT code when a VA blocker forces distant mmap placement.
 
-1. A prior materialization fails (duplicate symbol), leaking its mmap slab.
-2. The kept-alive traceback (pytest, sys.exc_info) prevents the old LLJIT's
-   memory from being reclaimed.
-3. The kernel places new mmap reservations far from the old ones.
-
-A VA blocker (PROT_NONE MAP_FIXED_NOREPLACE) makes this deterministic on CI.
+With -fPIC (default), GCC uses R_X86_64_GOTPCRELX (GOT-relative) which
+has no ±2GB limit.  Using -fpie forces the problematic PC32 relocations.
 """
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import platform
 import sys
 from pathlib import Path
 
@@ -42,15 +40,12 @@ from utils import build_test_objects
 
 OBJ_DIR = build_test_objects()
 
-_is_linux_x86 = sys.platform == "linux" and "x86_64" in (
-    __import__("platform").machine(),
-    "",
-)
+_is_linux_x86 = sys.platform == "linux" and platform.machine() in ("x86_64", "AMD64")
 
 _PROT_NONE = 0
 _MAP_PRIVATE_ANON = 0x22  # MAP_PRIVATE | MAP_ANONYMOUS
 _MAP_FIXED_NOREPLACE = 0x100000
-_BLOCK_RADIUS = 2 * 1024 * 1024 * 1024  # 2 GB — must exceed Delta32 ±2GB range
+_BLOCK_RADIUS = 3 * 1024 * 1024 * 1024  # 3 GB — exceeds Delta32 ±2GB range
 
 
 def _get_libc() -> ctypes.CDLL:
@@ -123,70 +118,39 @@ def obj(name: str) -> str:
     return str(path)
 
 
-def _discover_cpp_gcc_variants() -> list[str]:
-    return [s for s in ["cc-gcc"] if (OBJ_DIR / s / "test_funcs.o").exists()]
+def _discover_pie_cpp_variants() -> list[str]:
+    return [s for s in ["cc-gcc-pie"] if (OBJ_DIR / s / "test_funcs.o").exists()]
 
 
-_cpp_gcc_variants = _discover_cpp_gcc_variants()
+_pie_cpp_variants = _discover_pie_cpp_variants()
 
 
 @pytest.mark.skipif(not _is_linux_x86, reason="Linux x86_64 only")
-@pytest.mark.skipif(not _cpp_gcc_variants, reason="No GCC C++ objects available")
-@pytest.mark.parametrize("variant", _cpp_gcc_variants)
-def test_dso_handle_overflow_with_leaked_sessions(variant: str) -> None:
-    """Demonstrate Delta32 overflow for __dso_handle after leaked materializations.
+@pytest.mark.skipif(not _pie_cpp_variants, reason="No GCC PIE C++ objects available")
+@pytest.mark.parametrize("variant", _pie_cpp_variants)
+def test_dso_handle_pc32_overflow(variant: str) -> None:
+    """__dso_handle PC32 overflows under VA pressure without arena.
 
-    Steps:
-    1. Create sessions with failed materializations (duplicate symbol).
-       Keep them alive to leak their mmap slabs.
-    2. Block nearby VA so the next session's allocations scatter.
-    3. Create a fresh session and load GCC C++ objects into two libraries.
-    4. Without an arena allocator, the __dso_handle symbol (defined by
-       ELFNixPlatform in a separate allocation) can be >2GB from JIT code,
-       causing a Delta32 relocation overflow.
+    PIE GCC objects (-fpie) use R_X86_64_PC32 for __dso_handle (±2GB
+    range), unlike -fPIC objects which use R_X86_64_GOTPCRELX.
+    A 3GB VA blocker pushes the second library's code >2GB from
+    __dso_handle (materialized with the first library), causing
+    a Delta32 relocation overflow.
     """
-    # Step 1: Leak JIT memory via failed materializations.
-    # Keep sys.exc_info tracebacks alive (like pytest does) so old sessions'
-    # LLJIT mmap regions are not freed — this is critical for triggering the
-    # address space fragmentation.
-    leaked = []  # (session, lib, exc_info_tuple)
-    for _ in range(10):
-        s = ExecutionSession()
-        lib = s.create_library("warmup")
-        lib.add(obj(f"{variant}/test_funcs"))
-        lib.get_function("test_add")(10, 20)
-        exc_info = None
-        try:
-            lib.add(obj(f"{variant}/test_funcs_conflict"))
-        except Exception:
-            exc_info = sys.exc_info()  # keeps traceback → keeps frame locals → keeps LLJIT alive
-        leaked.append((s, lib, exc_info))
-
-    # Step 2: Find where LLVM's JIT memory ended up, then block nearby VA
-    # gaps so the *next* session's InProcessMemoryMapper is forced to
-    # reserve a new region far from the leaked slabs.
     maps_before = set(_parse_maps())
-    probe = ExecutionSession()
-    probe_lib = probe.create_library("probe")
-    probe_lib.add(obj(f"{variant}/test_funcs"))
+
+    session = ExecutionSession()
+    lib1 = session.create_library("lib1")
+    lib1.add(obj(f"{variant}/test_funcs"))
+    assert lib1.get_function("test_add")(10, 20) == 30
+
+    # Block 3GB of VA around the first allocation to force scatter
     maps_after = _parse_maps()
     new_maps = _find_new_mappings(maps_before, maps_after)
-    jit_center = max(s for s, e in new_maps) if new_maps else 0
-    # Keep probe alive — its mmap slab adds pressure.
-    leaked.append((probe, probe_lib, None))
+    jit_center = max(s for s, e in new_maps) if new_maps else 0xFFFF00000000
 
-    blockers = block_nearby_va(jit_center) if jit_center else []
-
+    blockers = block_nearby_va(jit_center, radius=_BLOCK_RADIUS)
     try:
-        # Step 3: Fresh session — __dso_handle (allocated by ELFNixPlatform
-        # in DSOHandleMaterializationUnit during createJITDylib) may end up
-        # in a different slab than the code (allocated during lib.add),
-        # exceeding ±2GB Delta32 range.
-        session = ExecutionSession()
-        lib1 = session.create_library("lib1")
-        lib1.add(obj(f"{variant}/test_funcs"))
-        assert lib1.get_function("test_add")(10, 20) == 30
-
         lib2 = session.create_library("lib2")
         lib2.add(obj(f"{variant}/test_funcs_conflict"))
         assert lib2.get_function("test_add")(10, 20) == 1030
