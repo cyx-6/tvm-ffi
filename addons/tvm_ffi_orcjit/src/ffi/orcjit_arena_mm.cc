@@ -26,18 +26,17 @@
  */
 #include "orcjit_arena_mm.h"
 
+#ifdef __linux__
+
 #include <llvm/ExecutionEngine/JITLink/JITLink.h>
 #include <llvm/ExecutionEngine/Orc/Shared/AllocationActions.h>
 #include <llvm/Support/Alignment.h>
 #include <llvm/Support/FormatVariadic.h>
 #include <llvm/Support/Memory.h>
+#include <sys/mman.h>
 
 #include <algorithm>
 #include <cstring>
-
-#ifndef _WIN32
-#include <sys/mman.h>
-#endif
 
 namespace tvm {
 namespace ffi {
@@ -355,3 +354,5 @@ void ArenaJITLinkMemoryManager::deallocate(std::vector<FinalizedAlloc> Allocs,
 }  // namespace orcjit
 }  // namespace ffi
 }  // namespace tvm
+
+#endif  // __linux__

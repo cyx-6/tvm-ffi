@@ -90,8 +90,7 @@ class ArenaJITLinkMemoryManager : public llvm::jitlink::JITLinkMemoryManager {
   void allocate(const llvm::jitlink::JITLinkDylib* JD, llvm::jitlink::LinkGraph& G,
                 OnAllocatedFunction OnAllocated) override;
 
-  void deallocate(std::vector<FinalizedAlloc> Allocs,
-                  OnDeallocatedFunction OnDeallocated) override;
+  void deallocate(std::vector<FinalizedAlloc> Allocs, OnDeallocatedFunction OnDeallocated) override;
 
  private:
   class ArenaInFlightAlloc;

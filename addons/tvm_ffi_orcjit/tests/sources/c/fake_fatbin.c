@@ -23,8 +23,8 @@
  * R_AARCH64_ABS64), never by PC-relative relocations.  This lets us test
  * overflow-region classification without needing a real CUDA toolchain.
  */
-#include <tvm/ffi/c_api.h>
 #include <stdint.h>
+#include <tvm/ffi/c_api.h>
 
 #ifdef __APPLE__
 __attribute__((section("__DATA,.nv_fatbin"), used))
@@ -37,7 +37,7 @@ static const uint8_t fake_fatbin_data[4 * 1024 * 1024] = {0};
    The reference to fake_fatbin_data generates an absolute relocation
    (R_*_64 / R_AARCH64_ABS64), NOT PC-relative. */
 TVM_FFI_DLL_EXPORT int __tvm_ffi_get_fatbin_size(void* self, const TVMFFIAny* args,
-                                                  int32_t num_args, TVMFFIAny* result) {
+                                                 int32_t num_args, TVMFFIAny* result) {
   volatile const void* p = fake_fatbin_data;
   (void)p;
   result->type_index = kTVMFFIInt;
