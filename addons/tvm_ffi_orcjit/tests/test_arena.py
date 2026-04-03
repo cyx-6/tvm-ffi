@@ -329,7 +329,6 @@ def test_large_data_section(variant: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="Leaked materialization crashes LLVM ORC runtime on session teardown")
 @pytest.mark.skipif(not _is_linux, reason="ELF/GCC-specific __dso_handle test")
 @pytest.mark.parametrize("variant", _cpp_variants)
 def test_dso_handle_relocation_after_failed_materialization(variant: str) -> None:
@@ -350,7 +349,7 @@ def test_dso_handle_relocation_after_failed_materialization(variant: str) -> Non
     """
     # Step 1: Trigger leaked materializations to consume low VA space.
     leaked_sessions = []
-    for i in range(3):
+    for _ in range(3):
         s0 = ExecutionSession()
         lib0 = s0.create_library("warmup")
         lib0.add(obj(f"{variant}/test_funcs"))
