@@ -21,7 +21,11 @@ import inspect
 from typing import Any
 
 import pytest
-from tvm_ffi.utils.kwargs_wrapper import make_kwargs_wrapper, make_kwargs_wrapper_from_signature
+from tvm_ffi.utils.kwargs_wrapper import (
+    make_kwargs_wrapper,
+    make_kwargs_wrapper_from_signature,
+    shallow_astuple,
+)
 
 
 def test_basic_wrapper() -> None:
@@ -451,3 +455,150 @@ def test_map_dataclass_to_tuple() -> None:
     )
     result = wrapper(1, Config(x=10, y=20))
     assert result == (1, (10, 20))
+
+
+def test_shallow_astuple_helper() -> None:
+    """shallow_astuple flattens without deepcopy; leaf identity is preserved."""
+
+    @dataclasses.dataclass
+    class Cfg:
+        x: object
+        y: object
+
+    @dataclasses.dataclass
+    class Outer:
+        inner: Cfg
+        tail: object
+
+    leaf = object()
+    cfg = Cfg(x=leaf, y=[1, 2])
+    result = shallow_astuple(cfg)
+    assert result == (leaf, [1, 2])
+    # Leaf identity preserved (unlike dataclasses.astuple which deepcopies).
+    assert result[0] is leaf
+    assert result[1] is not cfg.y  # lists are rebuilt so their elements can recurse
+    assert result[1][0] == 1 and result[1][1] == 2
+
+    # Nested dataclass recurses
+    outer = Outer(inner=cfg, tail="done")
+    r = shallow_astuple(outer)
+    assert r == ((leaf, [1, 2]), "done")
+    assert r[0][0] is leaf
+
+    # Non-dataclass passes through unchanged
+    assert shallow_astuple(42) == 42
+    assert shallow_astuple(None) is None
+    assert shallow_astuple("str") == "str"
+
+
+def test_shallow_astuple_refuses_deepcopy() -> None:
+    """An object whose __deepcopy__ raises survives shallow_astuple.
+
+    This mirrors how opaque FFI handles (e.g. tvm_ffi.Tensor) must flow through
+    kwargs_wrapper without being cloned.
+    """
+
+    class NoDeepcopy:
+        def __deepcopy__(self, memo: dict) -> "NoDeepcopy":
+            raise TypeError("cannot deepcopy NoDeepcopy")
+
+    @dataclasses.dataclass
+    class Holder:
+        handle: object
+
+    handle = NoDeepcopy()
+    h = Holder(handle=handle)
+
+    # dataclasses.astuple would raise; shallow_astuple must not.
+    with pytest.raises(TypeError):
+        dataclasses.astuple(h)
+    assert shallow_astuple(h) == (handle,)
+    assert shallow_astuple(h)[0] is handle
+
+
+def test_dataclass_to_tuple_shallow_option() -> None:
+    """Wrapper honors a user-supplied dataclass_to_tuple callable (shallow_astuple)."""
+
+    @dataclasses.dataclass
+    class Cfg:
+        handle: object
+        n: int
+
+    class NoDeepcopy:
+        def __deepcopy__(self, memo: dict) -> "NoDeepcopy":
+            raise TypeError("nope")
+
+    def target(*args: Any) -> tuple[Any, ...]:
+        return args
+
+    handle = NoDeepcopy()
+    cfg = Cfg(handle=handle, n=7)
+
+    # Default (deep) path raises on undeepcopyable leaf.
+    wrapper_deep = make_kwargs_wrapper(target, ["cfg"], map_dataclass_to_tuple=["cfg"])
+    with pytest.raises(TypeError):
+        wrapper_deep(cfg)
+
+    # Shallow path: leaf identity preserved, no deepcopy.
+    wrapper_shallow = make_kwargs_wrapper(
+        target,
+        ["cfg"],
+        map_dataclass_to_tuple=["cfg"],
+        dataclass_to_tuple=shallow_astuple,
+    )
+    result = wrapper_shallow(cfg)
+    assert result == ((handle, 7),)
+    assert result[0][0] is handle
+
+
+def test_dataclass_to_tuple_custom_callable() -> None:
+    """Users may supply an arbitrary callable for dataclass flattening."""
+
+    @dataclasses.dataclass
+    class Cfg:
+        a: int
+        b: int
+
+    def named_flatten(obj: Cfg) -> tuple[Any, ...]:
+        return tuple((f.name, getattr(obj, f.name)) for f in dataclasses.fields(obj))
+
+    def target(*args: Any) -> tuple[Any, ...]:
+        return args
+
+    wrapper = make_kwargs_wrapper(
+        target,
+        ["cfg"],
+        map_dataclass_to_tuple=["cfg"],
+        dataclass_to_tuple=named_flatten,
+    )
+    result = wrapper(Cfg(a=1, b=2))
+    assert result == ((("a", 1), ("b", 2)),)
+
+
+def test_dataclass_to_tuple_via_from_signature() -> None:
+    """make_kwargs_wrapper_from_signature plumbs dataclass_to_tuple through."""
+
+    @dataclasses.dataclass
+    class Cfg:
+        handle: object
+
+    class NoDeepcopy:
+        def __deepcopy__(self, memo: dict) -> "NoDeepcopy":
+            raise TypeError("nope")
+
+    def target(*args: Any) -> tuple[Any, ...]:
+        return args
+
+    def source_func(a: int, cfg: Cfg) -> None:
+        pass
+
+    wrapper = make_kwargs_wrapper_from_signature(
+        target,
+        inspect.signature(source_func),
+        map_dataclass_to_tuple=["cfg"],
+        dataclass_to_tuple=shallow_astuple,
+    )
+    handle = NoDeepcopy()
+    result = wrapper(1, Cfg(handle=handle))
+    assert result == (1, (handle,))
+    assert result[1][0] is handle

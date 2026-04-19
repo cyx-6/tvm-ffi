@@ -31,6 +31,29 @@ from typing import Any, Callable, Iterable
 # Sentinel object for missing arguments
 MISSING = object()
 
+
+def shallow_astuple(obj: Any) -> Any:
+    """Recursive dataclass-to-tuple flatten that does not deepcopy leaves.
+
+    Recurses through nested dataclasses, lists, and tuples; returns every
+    non-container leaf by reference.
+
+    Intended as a drop-in for :func:`dataclasses.astuple` when the dataclass
+    carries leaves that are not deepcopy-safe (opaque FFI handles, GPU
+    tensors, etc.) or when leaf identity must be preserved across the call.
+    Pass it via ``dataclass_to_tuple=shallow_astuple`` to
+    :func:`make_kwargs_wrapper`.
+    """
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return tuple(
+            shallow_astuple(getattr(obj, f.name)) for f in dataclasses.fields(obj)
+        )
+    if isinstance(obj, list):
+        return [shallow_astuple(x) for x in obj]
+    if isinstance(obj, tuple):
+        return tuple(shallow_astuple(x) for x in obj)
+    return obj
+
 # Internal variable names used in generated code to avoid user argument conflicts
 _INTERNAL_TARGET_FUNC = "__i_target_func"
 _INTERNAL_MISSING = "__i_MISSING"
@@ -218,6 +241,7 @@ def make_kwargs_wrapper(
     kwonly_defaults: dict[str, Any] | None = None,
     prototype: Callable | None = None,
     map_dataclass_to_tuple: list[str] | None = None,
+    dataclass_to_tuple: Callable[[Any], Any] = dataclasses.astuple,
 ) -> Callable:
     """Create a wrapper with kwargs support for a function that only accepts positional arguments.
 
@@ -253,9 +277,18 @@ def make_kwargs_wrapper(
         __qualname__, __annotations__) from. If None, no metadata is copied.
     map_dataclass_to_tuple
         Optional list of argument names whose values should be converted from dataclass
-        instances to tuples (via ``dataclasses.astuple``) before being passed to the
-        target function. This is useful when the target function expects flattened tuple
-        arguments but callers pass dataclass instances.
+        instances to tuples before being passed to the target function. This is useful
+        when the target function expects flattened tuple arguments but callers pass
+        dataclass instances. The conversion function is controlled by the
+        ``dataclass_to_tuple`` parameter.
+    dataclass_to_tuple
+        Callable used to convert dataclass arguments listed in ``map_dataclass_to_tuple``
+        to tuples. Defaults to :func:`dataclasses.astuple`, which recursively converts
+        nested dataclasses and :func:`copy.deepcopy`-s non-container leaves. Pass
+        :func:`shallow_astuple` (defined in this module) to preserve leaf identity,
+        which is required when dataclass fields carry opaque handles (e.g. FFI tensors,
+        GPU buffers) that are not deepcopy-safe or that must not be cloned. Any callable
+        of signature ``(obj) -> tuple`` may be supplied for custom flattening.
 
     Returns
     -------
@@ -296,7 +329,7 @@ def make_kwargs_wrapper(
         _INTERNAL_DEFAULTS_DICT: runtime_defaults,
     }
     if dc_to_tuple_set:
-        exec_globals[_INTERNAL_ASTUPLE] = dataclasses.astuple
+        exec_globals[_INTERNAL_ASTUPLE] = dataclass_to_tuple
     namespace: dict[str, Any] = {}
     exec(code_str, exec_globals, namespace)
     new_func = namespace["wrapper"]
@@ -314,6 +347,7 @@ def make_kwargs_wrapper_from_signature(
     prototype: Callable | None = None,
     exclude_arg_names: Iterable[str] | None = None,
     map_dataclass_to_tuple: list[str] | None = None,
+    dataclass_to_tuple: Callable[[Any], Any] = dataclasses.astuple,
 ) -> Callable:
     """Create a wrapper with kwargs support for a function that only accepts positional arguments.
 
@@ -336,8 +370,12 @@ def make_kwargs_wrapper_from_signature(
         does not exist in the signature, it is silently ignored.
     map_dataclass_to_tuple
         Optional list of argument names whose values should be converted from dataclass
-        instances to tuples (via ``dataclasses.astuple``) before being passed to the
-        target function.
+        instances to tuples before being passed to the target function. The conversion
+        function is controlled by the ``dataclass_to_tuple`` parameter.
+    dataclass_to_tuple
+        Callable used to convert dataclass arguments to tuples. Defaults to
+        :func:`dataclasses.astuple`. See :func:`make_kwargs_wrapper` for details on
+        when to pass :func:`shallow_astuple` instead.
 
     Returns
     -------
@@ -400,4 +438,5 @@ def make_kwargs_wrapper_from_signature(
         kwonly_defaults,
         prototype,
         map_dataclass_to_tuple,
+        dataclass_to_tuple,
     )
