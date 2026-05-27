@@ -102,10 +102,10 @@ cdef class CObject:
         # case of error before chandle is set
         self.chandle = NULL
 
-    def __dealloc__(self):
-        if self.chandle != NULL:
-            CHECK_CALL(TVMFFIObjectDecRef(self.chandle))
-            self.chandle = NULL
+    def __del__(self):
+        # tp_finalize: drives the chandle cleanup. Establishes the invariant
+        # ``self.chandle == NULL`` for the auto-generated tp_dealloc.
+        TVMFFIPyTPFinalize(<void**>&self.chandle, <PyObject*>self)
 
     def __ctypes_handle__(self) -> object:
         return ctypes_handle(self.chandle)
@@ -173,8 +173,12 @@ cdef class CObject:
         return isinstance(other, CObject) and self.chandle == (<CObject>other).chandle
 
     def __move_handle_from__(self, other: CObject) -> None:
-        self.chandle = (<CObject>other).chandle
+        cdef void* chandle = (<CObject>other).chandle
+        TVMFFIPyDetachPyObject(chandle, <PyObject*>other)
+        self.chandle = chandle
         (<CObject>other).chandle = NULL
+        if TVMFFIPyTryGetAttachedPyObject(chandle) == NULL:
+            TVMFFIPyAttachPyObject(chandle, <PyObject*>self)
 
     def __init_handle_by_constructor__(self, fconstructor: Any, *args: Any) -> None:
         # avoid error raised during construction.
@@ -183,6 +187,8 @@ cdef class CObject:
         ConstructorCall(
             (<CObject>fconstructor).chandle, <PyObject*>args, &chandle, NULL)
         self.chandle = chandle
+        if TVMFFIPyTryGetAttachedPyObject(chandle) == NULL:
+            TVMFFIPyAttachPyObject(chandle, <PyObject*>self)
 
 
 cdef class CContainerBase(CObject):
@@ -469,22 +475,37 @@ cdef inline object make_fallback_cls_for_type_index(int32_t type_index):
 
 
 cdef inline object make_ret_object(TVMFFIAny result):
-    cdef int32_t type_index
-    cdef object cls, obj
-    type_index = result.type_index
+    """Wrap a returned chandle into its canonical Python wrapper.
+
+    Caller must own +1 on ``result.v_obj``; ownership transfers to the
+    returned wrapper.
+    """
+    cdef int32_t type_index = result.type_index
+    cdef object cls, obj, cached
+    cdef PyObject* cached_pyobj
 
     if type_index < len(TYPE_INDEX_TO_CLS) and (cls := TYPE_INDEX_TO_CLS[type_index]) is not None:
         if issubclass(cls, PyNativeObject):
+            # Value-typed: the transient Object wrapper is discarded after
+            # __from_tvm_ffi_object__. No identity stability needed.
             obj = Object.__new__(Object)
             (<CObject>obj).chandle = result.v_obj
             return cls.__from_tvm_ffi_object__(cls, obj)
+        cached_pyobj = TVMFFIPyTryGetAttachedPyObject(result.v_obj)
+        if cached_pyobj != NULL:
+            cached = <object>cached_pyobj
+            if (<CObject>cached).chandle == NULL:
+                # Inactive -> Active: rebind, transferring caller's +1.
+                (<CObject>cached).chandle = result.v_obj
+            else:
+                # Active: wrapper already holds its own +1 on chandle.
+                CHECK_CALL(TVMFFIObjectDecRef(result.v_obj))
+            return cached
     else:
-        # Slow path: object is not found in registered entry
-        # In this case create a dummy stub class for future usage.
-        # For every unregistered class, this slow path will be triggered only once.
         cls = make_fallback_cls_for_type_index(type_index)
     obj = cls.__new__(cls)
     (<CObject>obj).chandle = result.v_obj
+    TVMFFIPyAttachPyObject(result.v_obj, <PyObject*>obj)
     return obj
 
 

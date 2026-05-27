@@ -361,6 +361,14 @@ def _env_get_current_stream(int device_type, int device_id):
 
 
 cdef extern from "tvm_ffi_python_helpers.h":
+    int TVMFFIPyRegisterDefaultAllocator() noexcept
+    void TVMFFIPyMarkPythonFinalizing() noexcept
+
+    PyObject* TVMFFIPyTryGetAttachedPyObject(void* chandle) noexcept
+    void TVMFFIPyAttachPyObject(void* chandle, PyObject* obj) noexcept
+    void TVMFFIPyDetachPyObject(void* chandle, PyObject* obj) noexcept
+    void TVMFFIPyTPFinalize(void** ptr_to_chandle, PyObject* wrapper) noexcept
+
     # no need to expose fields of the call context setter data structure
     ctypedef struct TVMFFIPyCallContext:
         int device_type
@@ -541,6 +549,12 @@ cdef _init_env_api():
 
 
 _init_env_api()
+
+
+CHECK_CALL(TVMFFIPyRegisterDefaultAllocator())
+
+import atexit as _tvm_ffi_atexit
+_tvm_ffi_atexit.register(TVMFFIPyMarkPythonFinalizing)
 
 # ensure testing is linked and we can run testcases
 TVMFFITestingDummyTarget()

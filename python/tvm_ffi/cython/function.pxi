@@ -545,9 +545,19 @@ cdef int TVMFFIPyArgSetterObjectRValueRef_(
     PyObject* py_arg, TVMFFIAny* out
 ) except -1:
     """Setter for ObjectRValueRef"""
-    cdef object arg = <object>py_arg
+    cdef CObject src = (<object>py_arg).obj
+    # need to detach from chandle
+    # there are two possible outcomes after the call:
+    #   chandle gets moved, so it is set to NULL
+    #   callee did not move chandle, in such case src.chandle is valid
+    #     but chandle is no longer attached to PyObject
+    # we need to carefully handle chandle and PyObject recycling in both cases.
+    # These logics are implemented in TVMFFIPyTPFinalize.
+    # NOTE: TVMFFIPyDetachPyObject is robust to cases where the Object is not
+    # allocated by the custom Python allocator.
+    TVMFFIPyDetachPyObject(src.chandle, <PyObject*>src)
     out.type_index = kTVMFFIObjectRValueRef
-    out.v_ptr = &((<CObject>(arg.obj)).chandle)
+    out.v_ptr = &(src.chandle)
     return 0
 
 
@@ -1089,6 +1099,7 @@ def _register_global_func(name: str, pyfunc: Callable[..., Any] | Function, over
 
 
 def _get_global_func(name: str, allow_missing: bool):
+    # PyObject tying is not applicable here.
     cdef TVMFFIObjectHandle chandle
     cdef ByteArrayArg name_arg = ByteArrayArg(c_str(name))
 

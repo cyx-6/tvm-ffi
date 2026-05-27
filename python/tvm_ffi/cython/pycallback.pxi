@@ -74,7 +74,13 @@ cdef int TVMFFIPyCallbackArgSetterObject_(
     const TVMFFIAny* arg,
     PyObject** out
 ) except -1:
-    """Callback arg setter for generic static object types (type_index >= kTVMFFIStaticObjectBegin)."""
+    """Callback arg setter for generic static object types (type_index >= kTVMFFIStaticObjectBegin).
+
+    Funnels through ``make_ret_object`` so the callback receives the
+    canonical wrapper for the chandle. When the caller already has a
+    wrapper for this chandle, the callback's arg is the same Python
+    object — universal cache-on aliasing.
+    """
     cdef TVMFFIObjectHandle chandle = arg.v_ptr
     TVMFFIObjectIncRef(chandle)
     try:
@@ -228,6 +234,10 @@ cdef int TVMFFIPyCallbackArgSetterRValueRef_(
         if actual_type_index == kTVMFFITensor:
             obj = make_tensor_from_chandle(chandle, api)
         else:
+            # The rvalue setter on the caller side already eager-detached
+            # the source wrapper's binding via TVMFFIPyDetachPyObject, so
+            # this chandle is Init — make_ret_object allocates a fresh
+            # canonical wrapper and Attaches it.
             obj = make_ret_object(synthesized)
             if api != NULL and isinstance(obj, CContainerBase):
                 (<CContainerBase>obj)._dlpack_exchange_api = api

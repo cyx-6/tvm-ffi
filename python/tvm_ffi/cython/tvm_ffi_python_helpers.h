@@ -26,6 +26,7 @@
 #include <Python.h>
 #include <tvm/ffi/c_api.h>
 #include <tvm/ffi/extra/c_env_api.h>
+#include <tvm/ffi/memory.h>
 
 // Define here to avoid dependencies on non-c headers for now
 #ifndef TVM_FFI_INLINE
@@ -59,6 +60,7 @@
 #endif
 #endif
 
+#include <atomic>
 #include <cstring>
 #include <exception>
 #include <iostream>
@@ -70,6 +72,327 @@
 /// We deliberately designed the data structure and function to be C-style
 //  prefixed with TVMFFIPy so they can be easily invoked through Cython.
 ///--------------------------------------------------------------------------------
+
+//================================================================================
+// PyObject-tying state machine.
+//
+// Ties one Python wrapper to one C++ chandle so that
+//   - ``a.x is a.x`` while the wrapper is live;
+//   - ``id(a.x)`` is stable across drop+refetch (when other C++ holders keep
+//     the chandle alive);
+//   - ``f(x) is x`` whenever an FFI function returns a chandle that already
+//     has a canonical wrapper.
+//
+// Layout
+// ------
+// Every Object allocated through the registered Python allocator
+// (`TVMFFIPyAllocate`) is preceded by a 16-byte ``PyCustomAllocHeader``:
+//
+//   malloc start
+//   +-------------------+--------------------------+--------+
+//   |   cached_pyobj    | TVMFFIObjectAllocHeader  |   T    |
+//   |   (offset 0..8)   |   delete_space (8..16)   |        |
+//   +-------------------+--------------------------+--------+
+//                                                  ^ ptr = malloc + 16
+//
+// The single ``cached_pyobj`` field is the canonical Python wrapper
+// pointer (or NULL). The Active vs Inactive distinction lives on the
+// wrapper's own ``chandle`` field, not on the header.
+//
+// States
+// ------
+//   Detached: ``header.cached_pyobj == NULL``
+//             No Python wrapper bound to this chandle.
+//   Active:   ``header.cached_pyobj == self`` AND ``self.chandle == chandle``
+//             ``self`` is the canonical Python wrapper for the chandle.
+//             Wrapper holds +1 on chandle (released by ``tp_finalize``).
+//   Inactive: ``header.cached_pyobj == self`` AND ``self.chandle == NULL``
+//             Wrapper memory is preserved (Python refcount kept alive by
+//             a phantom +1 from ``tp_finalize``). The wrapper does NOT
+//             hold +1 on chandle; the chandle stays alive only via other
+//             C++ holders.
+//
+// Invariants
+// ----------
+//   I1. When a PyObject goes out of scope (no Python var refers to it),
+//       its +1 on chandle is always released.
+//   I2. When a chandle is destroyed, its cached PyObject (if any) is
+//       reclaimed.
+//   I3. ``self.chandle != NULL`` implies ``self`` owns +1 on that chandle.
+//       Any reader of ``self.chandle`` that follows the pointer must
+//       therefore observe a live object.
+//
+// Where transitions happen
+// ------------------------
+// ``make_ret_object`` (object.pxi)
+//     Detached -> Active : fresh ``cls.__new__(cls)`` then
+//                          ``TVMFFIPyAttachPyObject`` records the binding.
+//     Active   -> Active : returns the cached wrapper, DecRef the caller's
+//                          redundant +1.
+//     Inactive -> Active : returns the cached wrapper, rebinds
+//                          ``self.chandle`` to transfer the caller's +1.
+//                          No header write needed: ``cached_pyobj`` already
+//                          points at this wrapper.
+//
+// ``TVMFFIPyTPFinalize`` (CObject.__del__)
+//     Active   -> Inactive : other C++ holders keep the chandle alive.
+//                            Null ``self.chandle`` BEFORE DecRef (preserves
+//                            I3), DecRef chandle, then resurrect the
+//                            PyObject with Py_IncRef so a future re-fetch
+//                            can rebind. ``cached_pyobj`` unchanged.
+//     Active   -> Detached : last C++ holder. Clear ``cached_pyobj`` first
+//                            (so the chandle deleter, which fires inside
+//                            DecRef, does not GC_Del our bytes), then null
+//                            ``self.chandle`` and DecRef.
+//     Detached -> Detached : ``self`` is not the canonical wrapper for
+//                            this chandle (eager-detach via move already
+//                            cleared the binding). Just DecRef.
+//
+// ``TVMFFIPyArgSetterObjectRValueRef_`` (function.pxi),
+// ``__move_handle_from__`` (object.pxi)
+//     Active   -> Detached : call ``TVMFFIPyDetachPyObject`` BEFORE the
+//                            wrapper's ``chandle`` is nulled during a
+//                            move; clears the header binding so
+//                            subsequent code paths do not mistake the
+//                            moved-from wrapper for the canonical one.
+//                            ``__move_handle_from__`` then rebinds via
+//                            ``TVMFFIPyAttachPyObject`` if the chandle
+//                            still has no canonical wrapper.
+//
+// ``TVMFFIPyDeleteSpace`` (Weak deleter)
+//     Inactive -> (gone)   : chandle refcount finally hit 0 while a
+//                            preserved wrapper was sitting in Inactive.
+//                            GC_Del the wrapper (under the GIL) then free
+//                            the malloc block. Active never reaches here
+//                            with ``cached_pyobj != NULL`` because
+//                            ``TVMFFIPyTPFinalize`` always runs first.
+//
+// Shutdown guard
+// --------------
+// ``TVMFFIPyMarkPythonFinalizing`` is wired to atexit from Cython module
+// init. After it fires, Inactive wrapper bytes are intentionally leaked
+// (process exiting; OS reclaims) rather than reaching for
+// ``PyGILState_Ensure`` on a teardown interpreter.
+//================================================================================
+
+/*!
+ * \brief Python-side derived header. ``base.delete_space`` sits at
+ *        ``ptr - sizeof(TVMFFIObjectAllocHeader)`` so the generic C++
+ *        deleter (which knows nothing about Python) can find it.
+ */
+struct PyCustomAllocHeader {
+  PyObject* cached_pyobj;
+  TVMFFIObjectAllocHeader base;
+};
+
+constexpr size_t kPyHeaderOffset = sizeof(PyCustomAllocHeader);  // 16
+static_assert(kPyHeaderOffset == 16,
+              "header must be 16 bytes so T at ptr = malloc + 16 is naturally "
+              "aligned for alignof(T) up to alignof(max_align_t)");
+static_assert(offsetof(PyCustomAllocHeader, base) ==
+                  kPyHeaderOffset - sizeof(TVMFFIObjectAllocHeader),
+              "base must sit at ptr - sizeof(TVMFFIObjectAllocHeader) for the "
+              "C++ deleter to find it");
+
+TVM_FFI_INLINE PyCustomAllocHeader* TVMFFIPyHeader(void* ptr) {
+  return reinterpret_cast<PyCustomAllocHeader*>(static_cast<char*>(ptr) - kPyHeaderOffset);
+}
+
+// Forward decl; defined below.
+//
+// NOTE: deliberately *not* TVM_FFI_INLINE. TVM_FFI_INLINE expands to
+// [[gnu::always_inline]] which forbids taking the function's address as
+// a stable, callable pointer — and we hand the address to the C++ side
+// (stored in PyCustomAllocHeader::base.delete_space at allocate time).
+inline void TVMFFIPyDeleteSpace(void* ptr);
+
+// Atexit-driven shutdown guard. ``TVMFFIPyMarkPythonFinalizing`` flips
+// the flag to false from an atexit hook registered in Cython module init;
+// ``TVMFFIPyDeleteSpace`` reads it via ``TVMFFIPyIsPythonAlive`` before
+// ``PyGILState_Ensure`` to avoid touching a teardown interpreter.
+inline std::atomic<bool>& TVMFFIPyAliveFlagStorage() {
+  static std::atomic<bool> flag{true};
+  return flag;
+}
+
+extern "C" inline bool TVMFFIPyIsPythonAlive() noexcept {
+  return TVMFFIPyAliveFlagStorage().load(std::memory_order_acquire);
+}
+
+extern "C" inline void TVMFFIPyMarkPythonFinalizing() noexcept {
+  TVMFFIPyAliveFlagStorage().store(false, std::memory_order_release);
+}
+
+/*!
+ * \brief True iff ``chandle`` was allocated through the Python custom
+ *        allocator (full ``PyCustomAllocHeader`` ahead of it). False for
+ *        allocations that came through libtvm_ffi's builtin default
+ *        (only the base ``TVMFFIObjectAllocHeader``).
+ *
+ * Detection is by comparing ``base.delete_space`` against
+ * ``TVMFFIPyDeleteSpace``: each frontend recognizes its own deleter
+ * pointer, so multiple frontends can coexist without a flag bit on
+ * ``TVMFFIObject``.
+ */
+TVM_FFI_INLINE bool TVMFFIPyIsCanonical(void* chandle) {
+  if (chandle == nullptr) return false;
+  TVMFFIObjectAllocHeader* base = reinterpret_cast<TVMFFIObjectAllocHeader*>(
+      static_cast<char*>(chandle) - sizeof(TVMFFIObjectAllocHeader));
+  return base->delete_space == &TVMFFIPyDeleteSpace;
+}
+
+//---------------------------------------------------------------
+// State-machine helpers.
+//---------------------------------------------------------------
+
+extern "C" {
+
+/*!
+ * \brief Return the cached PyObject bound to ``chandle``, or NULL.
+ *
+ * Active -> returns ``cached_pyobj`` (caller can re-use as canonical
+ * wrapper).
+ * Inactive -> returns ``cached_pyobj`` (caller rebinds
+ * ``cached_pyobj.chandle = chandle`` to revive). Caller discriminates
+ * Active vs Inactive by inspecting ``cached_pyobj.chandle``.
+ * Detached or non-Python chandle -> returns NULL.
+ */
+TVM_FFI_INLINE PyObject* TVMFFIPyTryGetAttachedPyObject(void* chandle) {
+  if (!TVMFFIPyIsCanonical(chandle)) return nullptr;
+  return TVMFFIPyHeader(chandle)->cached_pyobj;
+}
+
+/*!
+ * \brief Bind ``obj`` to ``chandle`` as the canonical PyObject
+ *        (Detached -> Active). Used for the fresh-allocation path; the
+ *        Inactive -> Active revival path does not call this because
+ *        ``cached_pyobj`` already points at the surviving wrapper.
+ *        No-op for chandles without a Python alloc header.
+ */
+TVM_FFI_INLINE void TVMFFIPyAttachPyObject(void* chandle, PyObject* obj) {
+  if (!TVMFFIPyIsCanonical(chandle)) return;
+  TVMFFIPyHeader(chandle)->cached_pyobj = obj;
+}
+
+/*!
+ * \brief Clear the canonical-PyObject binding (Active -> Detached).
+ *        No-op when ``obj`` is not the bound PyObject, or for chandles
+ *        without a Python alloc header.
+ */
+TVM_FFI_INLINE void TVMFFIPyDetachPyObject(void* chandle, PyObject* obj) {
+  if (!TVMFFIPyIsCanonical(chandle)) return;
+  PyCustomAllocHeader* h = TVMFFIPyHeader(chandle);
+  if (h->cached_pyobj == obj) {
+    h->cached_pyobj = nullptr;
+  }
+}
+
+/*!
+ * \brief tp_finalize hook. Releases the PyObject's +1 on chandle and
+ *        establishes ``wrapper.chandle == NULL`` for ``__dealloc__``.
+ *
+ *  Active -> Inactive: other C++ holders keep the chandle alive.
+ *    Null ``wrapper.chandle`` BEFORE DecRef (preserves I3), DecRef
+ *    chandle, then Py_IncRef wrapper to resurrect the PyObject
+ *    (PEP-442). The phantom +1 is later reclaimed by
+ *    ``TVMFFIPyDeleteSpace``.
+ *
+ *  Active -> Detached: last C++ holder. Detach the binding first so
+ *    the chandle deleter (fires inside DecRef when strong_count reaches
+ *    0) does not try to GC_Del our still-live PyObject. Then null
+ *    ``wrapper.chandle`` and DecRef.
+ *
+ *  Detached -> Detached: ``cached_pyobj`` was already cleared by an
+ *    eager move, or chandle was not allocated through the Python custom
+ *    allocator. Just null ``wrapper.chandle`` and DecRef.
+ */
+TVM_FFI_INLINE void TVMFFIPyTPFinalize(void** ptr_to_chandle, PyObject* wrapper) {
+  void* chandle = *ptr_to_chandle;
+  if (chandle == nullptr) return;
+  if (TVMFFIPyIsCanonical(chandle) && TVMFFIPyHeader(chandle)->cached_pyobj == wrapper) {
+    // Read strong count without atomic — under classic CPython the GIL
+    // serializes Python-side access, and C++-side DecRefs cross the FFI
+    // boundary which cannot run while we hold the GIL here.
+    uint64_t strong_count =
+        reinterpret_cast<TVMFFIObject*>(chandle)->combined_ref_count & 0xFFFFFFFFu;
+    if (strong_count > 1) {
+      // Active -> Inactive: keep cached_pyobj, null wrapper.chandle,
+      // DecRef, then resurrect via Py_IncRef.
+      *ptr_to_chandle = nullptr;
+      TVMFFIObjectDecRef(chandle);
+      Py_IncRef(wrapper);
+      return;
+    }
+    // Active -> Detached: detach first so the chandle deleter does not
+    // see us as a preserved Inactive wrapper.
+    TVMFFIPyDetachPyObject(chandle, wrapper);
+  }
+  // Tail for Active -> Detached and the already-Detached cases. Null
+  // wrapper.chandle BEFORE DecRef so any reader the deleter chain may
+  // observe sees a consistent (chandle == NULL, no +1 owed) state.
+  *ptr_to_chandle = nullptr;
+  TVMFFIObjectDecRef(chandle);
+}
+
+}
+
+//---------------------------------------------------------------
+// Custom allocator hook.
+//---------------------------------------------------------------
+
+/*!
+ * \brief Allocator entry registered with TVMFFISetCustomAllocator at
+ *        Cython module init. Allocates ``kPyHeaderOffset + size`` bytes
+ *        with ``alignment``, zero-inits the header to the Detached
+ *        state, wires ``base.delete_space = &TVMFFIPyDeleteSpace``, and
+ *        returns the T location.
+ *
+ * Handler::New static_asserts ``alignof(T) <= alignof(max_align_t)``, so
+ * the runtime ``alignment`` is bounded and ``base + kPyHeaderOffset``
+ * (= ``base + 16``) lands T naturally aligned for any T we allocate.
+ */
+inline void* TVMFFIPyAllocate(size_t size, size_t alignment, int32_t /*type_index*/,
+                              void* /*context*/) {
+  void* base_alloc =
+      ::tvm::ffi::details::AlignedAllocRuntime(kPyHeaderOffset + size, alignment);
+  auto* h = static_cast<PyCustomAllocHeader*>(base_alloc);
+  h->cached_pyobj = nullptr;  // Detached
+  h->base.delete_space = &TVMFFIPyDeleteSpace;
+  return static_cast<char*>(base_alloc) + kPyHeaderOffset;
+}
+
+/*!
+ * \brief delete_space callback installed by TVMFFIPyAllocate. Invoked from
+ *        the C++ Weak deleter when the chandle is freed.
+ *
+ * In the Inactive state, reclaims the preserved wrapper bytes via
+ * PyObject_GC_Del under the GIL before freeing the malloc block. After
+ * Python finalize starts (``TVMFFIPyIsPythonAlive() == false``) the
+ * wrapper bytes are intentionally leaked and only the malloc block is
+ * freed — process is exiting.
+ */
+inline void TVMFFIPyDeleteSpace(void* ptr) {
+  void* base_alloc = static_cast<char*>(ptr) - kPyHeaderOffset;
+  auto* h = static_cast<PyCustomAllocHeader*>(base_alloc);
+  if (h->cached_pyobj != nullptr && TVMFFIPyIsPythonAlive()) {
+    PyGILState_STATE gstate = PyGILState_Ensure();
+    if (TVMFFIPyIsPythonAlive()) {
+      PyObject_GC_Del(h->cached_pyobj);
+    }
+    PyGILState_Release(gstate);
+  }
+  ::tvm::ffi::details::AlignedFree(base_alloc);
+}
+
+/*!
+ * \brief Install ``TVMFFIPyAllocate`` as the process-wide custom allocator.
+ *        Storage for the registered entry is a function-static so the
+ *        address is process-stable.
+ */
+extern "C" TVM_FFI_INLINE int TVMFFIPyRegisterDefaultAllocator() {
+  static TVMFFICustomAllocator allocator{&TVMFFIPyAllocate, /*context=*/nullptr};
+  return TVMFFISetCustomAllocator(&allocator);
+}
 
 //------------------------------------------------------------------------------------
 // Helpers for Python thread-state attachment
