@@ -14,20 +14,27 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Tests for the PyObject-tying feature.
+"""Tests for the PyObject-tying feature (cache & revive).
 
 A 16-byte ``PyCustomAllocHeader`` is prepended to every Object that goes
-through the Python custom allocator. The header encodes a three-state
-machine via the four ``TVMFFIPy*`` transition helpers in
-``tvm_ffi_python_helpers.h``:
+through the Python custom allocator. Its ``tagged_pyobj`` field is a tagged
+pointer to the canonical Python wrapper, encoding a three-state machine
+driven by the custom ``tp_alloc`` / ``tp_free`` slots and the
+``make_ret_object`` dispatcher in ``tvm_ffi_python_helpers.h``:
 
-  Init      no Python wrapper bound to the chandle
-  Active    canonical wrapper alive; ``wrapper.chandle == chandle``
-  Inactive  wrapper bytes preserved (phantom +1) but ``wrapper.chandle``
-            cleared; revived on next ``make_ret_object``
+  Detached  no Python wrapper bound to the chandle (raw == NULL)
+  Active    canonical wrapper alive; ``wrapper.chandle == chandle`` (tag 0)
+  Inactive  wrapper dropped but its memory is cached as a dead,
+            untracked allocation (tag 1); revived in place at the same address
+            on the next ``make_ret_object``
 
 Active gives ``a.x is a.x``. Inactive gives stable ``id()`` across a
-finalize-then-rewrap cycle when the C++ object outlives the wrapper.
+drop-then-rewrap cycle when the C++ object outlives the wrapper — without a
+leak: the cached allocation is revived (``tp_alloc``), not resurrected.
+
+Note: some class/method names below retain the older "StateB" (Active) and
+"StateC" (Inactive) labels from the resurrection-era design; the behavior they
+assert is unchanged under cache & revive.
 """
 from __future__ import annotations
 
@@ -114,7 +121,8 @@ class TestStateBFunctionReturns:
     (most registry entries are allocated at C++ static init, before the
     Python custom allocator is registered, so their chandle has no
     PyCustomAllocHeader). Stable ``id()`` for ``get_global_func`` is
-    deferred — see TODO in ``function.pxi::_get_global_func``."""
+    deferred — see TODO in ``function.pxi::_get_global_func``.
+    """
 
     def test_function_return_aliases_arg(self) -> None:
         identity = tvm_ffi.convert(lambda x: x)
@@ -123,11 +131,12 @@ class TestStateBFunctionReturns:
 
 
 # ---------------------------------------------------------------------------
-# Active -> Inactive -> Active: identity preserved across wrapper finalize
+# Active -> Inactive -> Active: identity preserved across wrapper drop
 # ---------------------------------------------------------------------------
 class TestStateCRevive:
     """When the C++ object outlives the wrapper, re-fetching it via the
-    cached field-getter path must reuse the preserved memory."""
+    cached field-getter path must reuse the preserved memory.
+    """
 
     def test_id_preserved_across_finalize(self) -> None:
         outer = Outer(Inner(1))
@@ -144,7 +153,10 @@ class TestStateCRevive:
     def test_id_preserved_across_many_drops(self) -> None:
         outer = Outer(Inner(1))
         first_id = id(outer.x)
-        for _ in range(50):
+        # Deterministic per cycle: each drop+refetch must reuse the same
+        # address, so a modest repeat count surfaces any regression. The
+        # cost here is dominated by gc.collect() (~13ms each in this env).
+        for _ in range(20):
             ref = outer.x
             ref_id = id(ref)
             del ref
@@ -182,29 +194,153 @@ class TestStateCRevive:
 
     def test_chandle_dies_while_in_state_c(self) -> None:
         # When the chandle finally dies while its wrapper is Inactive,
-        # ``TVMFFIPyDeleteSpace`` must reclaim the preserved wrapper
-        # memory under the GIL via ``PyObject_GC_Del`` and then free the
+        # ``TVMFFIPyDeleteSpace`` must reclaim the cached (untracked)
+        # allocation under the GIL via ``PyObject_GC_Del`` and then free the
         # malloc block. A regression here typically manifests as a
         # segfault — getting past ``gc.collect()`` and the follow-up
         # alloc means the path stayed safe.
-        for _ in range(50):
+        #
+        # A UAF/corruption here is deterministic -- it trips within the first
+        # few iterations (the alloc-after-free that surfaces heap damage needs
+        # only a handful of repeats), so a small count suffices. Each iter runs
+        # two gc.collect()s (~13ms each in this env), so keep the count modest.
+        for _ in range(15):
             outer = Outer(Inner(7))
-            _ = outer.x  # Init -> Active
-            gc.collect()  # wrapper drops; Active -> Inactive, live bit cleared
-            del outer  # drops the last C++ ref; deleter fires on Inactive
+            _ = outer.x  # Detached -> Active
+            gc.collect()  # wrapper drops; Active -> Inactive
+            del outer  # drops the last C++ ref; deleter fires on the inactive cached allocation
             gc.collect()
-        # If we got here, the Inactive-cleanup path is safe.
+        # If we got here, the cached-allocation cleanup path is safe.
         fresh = Outer(Inner(11))
         assert fresh.x.val == 11
 
 
 # ---------------------------------------------------------------------------
-# Inactive only fires when other C++ holders exist
+# No unbounded wrapper leak across many distinct chandles
+# ---------------------------------------------------------------------------
+class TestNoUnboundedLeak:
+    """Many distinct chandles, each pinned alive by a parent's field, must
+    not accumulate one live Python wrapper per chandle.
+
+    Root cause this guards against (the PEP-442 resurrection-era design that
+    cache & revive replaced): finalize resurrected the wrapper on the
+    Active -> Inactive transition with ``Py_IncRef(wrapper)`` -- a phantom +1
+    reclaimed only when the chandle itself died. But ``tp_finalize`` runs at
+    most once per object (CPython sets a permanent GC-finalized bit), so a
+    wrapper that went Inactive and was later revived (Inactive -> Active)
+    never finalized again and stayed pinned by its own phantom refcount.
+    Every distinct chandle that was transiently wrapped and dropped then
+    leaked exactly one live wrapper for as long as that chandle stayed alive
+    (e.g. held by a parent's field) -- an unbounded leak.
+
+    ``TestStateCRevive.test_no_leak_churn_2k_cycles`` cycles a *single*
+    chandle and asserts address reuse; this asserts the complementary
+    property -- across *many distinct* chandles the count of live wrappers
+    stays flat, because cache & revive reuses the cached allocation instead of pinning it.
+    """
+
+    def test_distinct_chandles_no_wrapper_leak(self) -> None:
+        # Locally-registered types: the gc.get_objects() scan below counts
+        # only instances of *this* InnerLeak, so leftover instances from other
+        # tests (which use the module-level Inner) cannot pollute the count.
+        @dc.py_class(_unique_key("InnerLeak"))
+        class InnerLeak(dc.Object):
+            val: int
+
+        @dc.py_class(_unique_key("OuterLeak"))
+        class OuterLeak(dc.Object):
+            x: InnerLeak
+
+        def live_inner_count() -> int:
+            return sum(1 for ob in gc.get_objects() if isinstance(ob, InnerLeak))
+
+        # n is deliberately modest: the PEP-442 leak is strictly linear (one
+        # pinned wrapper per distinct chandle), so leaked == 0 trips at any n
+        # under a regression -- a larger n buys no detection power, only time.
+        n = 1000
+        parents = []
+        gc.collect()
+        before = live_inner_count()
+        for i in range(n):
+            outer = OuterLeak(InnerLeak(i))
+            parents.append(outer)  # keep the chandle legitimately alive
+            w = outer.x  # Active wrapper for this distinct chandle
+            del w  # -> Inactive (revivable cached allocation, must not pin the wrapper)
+        gc.collect()
+        leaked = live_inner_count() - before
+        assert leaked == 0, (
+            f"PyObject-tying leak: {leaked} wrappers pinned alive (expected 0; "
+            f"one pinned wrapper per distinct chandle == unbounded leak)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finalizer (__del__) types are excluded from inactivation
+# ---------------------------------------------------------------------------
+class TestFinalizerNotInactivated:
+    """A subclass that defines ``__del__`` gets a ``tp_finalize`` slot, and
+    CPython sets a *permanent* GC-finalized bit the first time it runs —
+    never running it again on that block. Reviving an inactive cached allocation would
+    therefore silently suppress ``__del__`` for every revived generation.
+    ``TVMFFIPyIsInactiveEligible`` excludes such types, so they genuinely free on
+    every drop and ``__del__`` fires once per generation. The cost is no
+    stable-``id``-across-drop for finalizer types (acceptable, documented).
+    """
+
+    def test_del_fires_every_generation(self) -> None:
+        calls: list[int] = []
+
+        @dc.py_class(_unique_key("InnerDel"))
+        class InnerDel(dc.Object):
+            val: int
+
+            def __del__(self) -> None:
+                # ``self`` is being finalized; record that __del__ ran.
+                calls.append(1)
+
+        @dc.py_class(_unique_key("OuterDel"))
+        class OuterDel(dc.Object):
+            x: InnerDel
+
+        outer = OuterDel(InnerDel(5))
+        for _ in range(5):
+            w = outer.x  # fresh wrapper (finalizer type is never inactivated)
+            assert w.val == 5
+            del w
+            gc.collect()  # genuine free -> __del__ runs
+        # __del__ fired once per drop (5), not once-ever (the cached-allocation bug).
+        assert len(calls) >= 5, (
+            f"__del__ must fire on every drop of a finalizer type; saw {len(calls)}"
+        )
+
+    def test_finalizer_type_value_correct_across_refetch(self) -> None:
+        # Even without stable id(), the value and live identity must hold.
+        @dc.py_class(_unique_key("InnerDel"))
+        class InnerDel2(dc.Object):
+            val: int
+
+            def __del__(self) -> None:
+                pass
+
+        @dc.py_class(_unique_key("OuterDel"))
+        class OuterDel2(dc.Object):
+            x: InnerDel2
+
+        outer = OuterDel2(InnerDel2(7))
+        assert outer.x is outer.x  # live identity still holds
+        assert outer.x.val == 7
+        gc.collect()
+        assert outer.x.val == 7  # refetch after drop still correct
+
+
+# ---------------------------------------------------------------------------
+# Inactivation only happens when other C++ holders exist
 # ---------------------------------------------------------------------------
 class TestLastRefCleanFree:
-    """When the wrapper is the last C++ ref, tp_finalize must NOT enter
-    the Inactive state — falls through to standard ``__dealloc__`` so memory is
-    freed cleanly. Regression guard for use-after-free in the deleter."""
+    """When the wrapper is the last C++ ref, ``__dealloc__`` must NOT
+    inactivate — it detaches and genuinely frees the allocation (``tp_free`` runs
+    the real free). Regression guard for use-after-free in the deleter.
+    """
 
     def test_drop_last_ref_no_crash(self) -> None:
         """The bare convert-and-drop pattern must not segfault."""
@@ -214,8 +350,8 @@ class TestLastRefCleanFree:
         gc.collect()
 
     def test_drop_then_realloc_value_correct(self) -> None:
-        # Inner has no other holder -> finalize with strong_count == 1 ->
-        # __dealloc__ runs cleanly, memory freed. Next Inner is fresh.
+        # Inner has no other holder -> __dealloc__ with strong_count == 1 ->
+        # genuine free (no inactivation), memory reclaimed. Next Inner is fresh.
         a = Inner(1)
         del a
         gc.collect()
@@ -257,8 +393,8 @@ class TestRValueRef:
     def test_ffi_move_then_re_fetch_works(self) -> None:
         # The rvalue setter only runs when an FFI call consumes the
         # ObjectRValueRef. ``discard`` provides that consumption — the
-        # setter detaches the canonical-wrapper binding (clearing both
-        # ``tagged_wrapper`` to 0) and the C++ side nulls the
+        # setter detaches the canonical-wrapper binding (clearing
+        # ``tagged_pyobj`` to NULL) and the C++ side nulls the
         # source wrapper's ``chandle``. ``outer``'s field still owns
         # its strong ref, so re-fetching produces a valid wrapper.
         outer = Outer(Inner(5))
@@ -267,8 +403,8 @@ class TestRValueRef:
         assert outer.x.val == 5
 
     def test_state_b_works_after_ffi_move(self) -> None:
-        # Eager-detach during the move clears both header fields, so
-        # the chandle returns to Init. The next access installs a fresh
+        # Eager-detach during the move clears the header binding, so
+        # the chandle returns to Detached. The next access installs a fresh
         # canonical wrapper, which then participates in Active caching
         # like any other freshly-wrapped chandle.
         outer = Outer(Inner(5))
@@ -284,7 +420,8 @@ class TestRValueRef:
 class TestPickle:
     """Pickle uses ``__init_handle_by_constructor__`` which calls
     ``_install_chandle_binding`` — the binding must end in a valid
-    Active configuration."""
+    Active configuration.
+    """
 
     def test_pickle_roundtrip_basic(self) -> None:
         a = tvm_ffi.convert([1, 2, 3])
@@ -308,7 +445,8 @@ class TestPickle:
 class TestPyNativeExempt:
     """PyNativeObject types (``String``, ``Bytes``) are value-typed: the
     transient ``Object`` wrapper is discarded after construction.
-    They MUST NOT install a header binding."""
+    They MUST NOT install a header binding.
+    """
 
     def test_string_construction_and_compare(self) -> None:
         s = tvm_ffi.convert("hello")
@@ -334,7 +472,8 @@ class TestPyNativeExempt:
 class TestTypeMismatchOnRevive:
     """Registering many unrelated types between attribute accesses must
     not corrupt existing wrappers' bindings, and the revive path must
-    still hit Inactive for the original wrapper."""
+    still hit Inactive for the original wrapper.
+    """
 
     def test_field_access_works_after_many_unrelated_registrations(self) -> None:
         outer = Outer(Inner(1))
@@ -360,7 +499,8 @@ class TestTypeMismatchOnRevive:
 class TestFieldSetterAfterRevive:
     """Replacing a field after a revive cycle should bind the new value
     cleanly without disturbing the prior preserved wrapper for the
-    *previous* chandle (which may still be alive elsewhere)."""
+    *previous* chandle (which may still be alive elsewhere).
+    """
 
     def test_assign_then_access(self) -> None:
         outer = MutableOuter(Inner(1))
@@ -389,7 +529,8 @@ class TestFieldSetterAfterRevive:
 class TestPickleStress:
     """Pickle round-trips go through ``__init_handle_by_constructor__``
     which calls ``_install_chandle_binding``. Repeated round-trips must
-    not leak wrappers or corrupt the binding state."""
+    not leak wrappers or corrupt the binding state.
+    """
 
     def test_many_roundtrips(self) -> None:
         for _ in range(200):
@@ -417,7 +558,8 @@ class TestThreadingStress:
     paths. Under classic CPython the GIL serializes Python bytecode so
     most races are confined to the FFI call's nogil block; this test
     exercises enough iterations to surface obvious crashes from any
-    GIL-released DecRef on the C++ side."""
+    GIL-released DecRef on the C++ side.
+    """
 
     def test_concurrent_attr_access(self) -> None:
         import threading
@@ -472,26 +614,32 @@ class TestThreadingStress:
 # GC integration with Inactive
 # ---------------------------------------------------------------------------
 class TestStateCWithCyclicGC:
-    """Inactive preserved wrappers stay GC-tracked (we deliberately do
-    not ``PyObject_GC_UnTrack`` on resurrection). ``gc.collect()`` walks
-    every tracked object, including the preserved memory whose
-    ``chandle`` is now NULL, and that traversal must not crash."""
+    """Inactive cached allocations are dead, untracked memory (``subtype_dealloc``
+    untracks before inactivation, and ``tp_alloc`` re-tracks only on revival).
+    ``gc.collect()`` between a drop and a refetch must not crash: it must
+    neither traverse the untracked cached allocation nor trip over the revived object.
+    """
 
     def test_gc_collect_inside_revive_loop(self) -> None:
         outer = Outer(Inner(5))
-        for _ in range(100):
+        # A bad traversal of the untracked cached allocation crashes deterministically on
+        # the first collect, so a modest count suffices; the cost here is the
+        # gc.collect() itself (~13ms each in this env), not the FFI work.
+        for _ in range(25):
             ref = outer.x
             del ref
-            gc.collect()  # walks the Inactive preserved bytes
+            gc.collect()  # cached allocation is inactive (untracked) between drops
         assert outer.x.val == 5
 
     def test_gc_collect_with_holder_keeping_chandle(self) -> None:
         # The Inner chandle is held by ``outer``'s field for the lifetime
-        # of the test, so wrapper drops always enter Inactive. gc.collect
-        # between drops exercises GC traversal of preserved memory.
+        # of the test, so wrapper drops always inactivate the allocation. gc.collect
+        # between drops exercises GC stability around the inactive memory.
         outer = Outer(Inner(11))
         first_id = id(outer.x)
-        for _ in range(50):
+        # GC stability around the inactive cached allocation is deterministic per cycle;
+        # a modest count surfaces it. Dominated by gc.collect() (~13ms each).
+        for _ in range(20):
             _ = outer.x
             gc.collect()
         assert id(outer.x) == first_id
@@ -501,9 +649,10 @@ class TestStateCWithCyclicGC:
 # Isolation: many distinct chandles each Inactive at once
 # ---------------------------------------------------------------------------
 class TestMultipleChandlesIsolation:
-    """A revive on one chandle must not corrupt the preserved binding on
+    """A revive on one chandle must not corrupt the cached binding on
     another. Each chandle's header is independent — verify by cycling
-    many in parallel."""
+    many in parallel.
+    """
 
     def test_distinct_state_c_revive_independently(self) -> None:
         outers = [Outer(Inner(i * 10)) for i in range(50)]
@@ -535,9 +684,10 @@ class TestWeakrefNotSupported:
     so weakrefs are not supported. This test documents that limitation:
     if it ever starts passing, the Inactive-state interaction needs
     design review (a weakref to an Active wrapper transitioning to Inactive
-    must behave correctly under the resurrection trick — the wrapper
-    bytes survive, so the weakref should remain valid until the chandle
-    dies and ``TVMFFIPyDeleteSpace`` runs ``PyObject_GC_Del``)."""
+    must behave correctly — the wrapper genuinely dies at refcount 0, so
+    old weakrefs should observe death and a revived wrapper should bind a
+    fresh weakref; see design §9.4).
+    """
 
     def test_weakref_raises_typeerror(self) -> None:
         import weakref

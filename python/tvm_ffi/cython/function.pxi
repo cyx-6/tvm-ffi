@@ -552,7 +552,7 @@ cdef int TVMFFIPyArgSetterObjectRValueRef_(
     #   callee did not move chandle, in such case src.chandle is valid
     #     but chandle is no longer attached to PyObject
     # we need to carefully handle chandle and PyObject recycling in both cases.
-    # These logics are implemented in TVMFFIPyTPFinalize.
+    # These logics are implemented in TVMFFIPyTpDealloc (CObject.__dealloc__).
     # NOTE: TVMFFIPyDetachPyObject is robust to cases where the Object is not
     # allocated by the custom Python allocator.
     TVMFFIPyDetachPyObject(src.chandle, <PyObject*>src)
