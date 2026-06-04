@@ -252,7 +252,7 @@ class TestNoUnboundedLeak:
             x: InnerLeak
 
         def live_inner_count() -> int:
-            return sum(1 for ob in gc.get_objects() if isinstance(ob, InnerLeak))
+            return sum(1 for ob in gc.get_objects() if type(ob) is InnerLeak)
 
         # n is deliberately modest: the PEP-442 leak is strictly linear (one
         # pinned wrapper per distinct chandle), so leaked == 0 trips at any n
