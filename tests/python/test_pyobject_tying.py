@@ -36,11 +36,15 @@ Note: some class/method names below retain the older "StateB" (Active) and
 "StateC" (Inactive) labels from the resurrection-era design; the behavior they
 assert is unchanged under cache & revive.
 """
+
 from __future__ import annotations
 
 import gc
 import itertools
 import pickle
+import threading
+import weakref
+from typing import Any
 
 import pytest
 import tvm_ffi
@@ -83,15 +87,18 @@ class TestStateBIdStable:
     """``a.x is a.x`` and ``id(a.x)`` stable while ``a`` lives."""
 
     def test_attr_access_is_same_object(self) -> None:
+        """Repeated attribute access returns the same wrapper object."""
         a = Outer(Inner(42))
         assert a.x is a.x
 
     def test_attr_access_id_stable(self) -> None:
+        """id() of an attribute is stable across repeated access."""
         a = Outer(Inner(7))
         ids = {id(a.x) for _ in range(100)}
         assert len(ids) == 1
 
     def test_chained_attr_access(self) -> None:
+        """Chained attribute access reuses the intermediate wrapper."""
         # Two-level access: outer.x.val triggers two FieldGetters; the
         # intermediate Inner wrapper must be reused so chained access
         # doesn't create transient garbage at different addresses.
@@ -101,6 +108,7 @@ class TestStateBIdStable:
         assert a.x.val == 11
 
     def test_two_outers_distinct_inners(self) -> None:
+        """Distinct C++ objects produce distinct Python wrappers."""
         # Different Outer instances wrapping different Inner C++ objects
         # MUST produce distinct Python wrappers.
         a = Outer(Inner(1))
@@ -125,6 +133,7 @@ class TestStateBFunctionReturns:
     """
 
     def test_function_return_aliases_arg(self) -> None:
+        """An FFI return aliases the canonical wrapper of its argument."""
         identity = tvm_ffi.convert(lambda x: x)
         x = tvm_ffi.convert([1, 2])
         assert identity(x) is x
@@ -139,18 +148,20 @@ class TestStateCRevive:
     """
 
     def test_id_preserved_across_finalize(self) -> None:
+        """id() and chandle survive a wrapper finalize-and-revive cycle."""
         outer = Outer(Inner(1))
-        first = outer.x          # Active: canonical wrapper installed
+        first = outer.x  # Active: canonical wrapper installed
         first_id = id(first)
         first_chandle = first.__chandle__()
         del first
-        gc.collect()             # transitions to Inactive
+        gc.collect()  # transitions to Inactive
 
-        revived = outer.x        # revive: same address
+        revived = outer.x  # revive: same address
         assert id(revived) == first_id
         assert revived.__chandle__() == first_chandle
 
     def test_id_preserved_across_many_drops(self) -> None:
+        """Each drop+refetch cycle reuses the same wrapper address."""
         outer = Outer(Inner(1))
         first_id = id(outer.x)
         # Deterministic per cycle: each drop+refetch must reuse the same
@@ -180,6 +191,7 @@ class TestStateCRevive:
         )
 
     def test_chandle_unchanged_across_revive(self) -> None:
+        """The chandle is unchanged across a revive cycle."""
         outer = Outer(Inner(99))
         chandle1 = outer.x.__chandle__()
         gc.collect()
@@ -187,12 +199,14 @@ class TestStateCRevive:
         assert chandle1 == chandle2
 
     def test_field_value_correct_after_revive(self) -> None:
+        """Field value is correct after the wrapper is revived."""
         outer = Outer(Inner(123))
         _ = outer.x  # ensure wrapper exists then dies
         gc.collect()
         assert outer.x.val == 123
 
     def test_chandle_dies_while_in_state_c(self) -> None:
+        """A chandle dying while Inactive reclaims the cached allocation safely."""
         # When the chandle finally dies while its wrapper is Inactive,
         # ``TVMFFIPyDeleteSpace`` must reclaim the cached (untracked)
         # allocation under the GIL via ``PyObject_GC_Del`` and then free the
@@ -240,6 +254,8 @@ class TestNoUnboundedLeak:
     """
 
     def test_distinct_chandles_no_wrapper_leak(self) -> None:
+        """Many distinct chandles do not pin one live wrapper each."""
+
         # Locally-registered types: the gc.get_objects() scan below counts
         # only instances of *this* InnerLeak, so leftover instances from other
         # tests (which use the module-level Inner) cannot pollute the count.
@@ -288,6 +304,7 @@ class TestFinalizerNotInactivated:
     """
 
     def test_del_fires_every_generation(self) -> None:
+        """__del__ fires on every drop of a finalizer type, not once-ever."""
         calls: list[int] = []
 
         @dc.py_class(_unique_key("InnerDel"))
@@ -314,6 +331,8 @@ class TestFinalizerNotInactivated:
         )
 
     def test_finalizer_type_value_correct_across_refetch(self) -> None:
+        """A finalizer type's value and live identity hold across refetch."""
+
         # Even without stable id(), the value and live identity must hold.
         @dc.py_class(_unique_key("InnerDel"))
         class InnerDel2(dc.Object):
@@ -350,6 +369,7 @@ class TestLastRefCleanFree:
         gc.collect()
 
     def test_drop_then_realloc_value_correct(self) -> None:
+        """Dropping the last ref frees the memory; a fresh alloc is correct."""
         # Inner has no other holder -> __dealloc__ with strong_count == 1 ->
         # genuine free (no inactivation), memory reclaimed. Next Inner is fresh.
         a = Inner(1)
@@ -370,6 +390,7 @@ class TestRValueRef:
     """
 
     def test_move_into_callback_no_crash(self) -> None:
+        """Moving an arg into a callback that re-moves it does not crash."""
         # Universal cache-on: callback arg aliases caller's ``x`` (one
         # wrapper, one chandle ref). The original blocker was a UAF in
         # the deleter path triggered by the eager-detach + chandle-null
@@ -378,7 +399,7 @@ class TestRValueRef:
         # and the post-call chandle is null.
         use_count = tvm_ffi.get_global_func("testing.object_use_count")
 
-        def callback(x: object, expected: int) -> object:
+        def callback(x: Any, expected: int) -> Any:
             gc.collect()
             assert expected == use_count(x)
             return x._move()
@@ -391,6 +412,7 @@ class TestRValueRef:
         assert x.__ctypes_handle__().value is None
 
     def test_ffi_move_then_re_fetch_works(self) -> None:
+        """Re-fetching a field after an FFI move yields a valid wrapper."""
         # The rvalue setter only runs when an FFI call consumes the
         # ObjectRValueRef. ``discard`` provides that consumption — the
         # setter detaches the canonical-wrapper binding (clearing
@@ -403,6 +425,7 @@ class TestRValueRef:
         assert outer.x.val == 5
 
     def test_state_b_works_after_ffi_move(self) -> None:
+        """Active caching resumes on a fresh wrapper after an FFI move."""
         # Eager-detach during the move clears the header binding, so
         # the chandle returns to Detached. The next access installs a fresh
         # canonical wrapper, which then participates in Active caching
@@ -424,12 +447,14 @@ class TestPickle:
     """
 
     def test_pickle_roundtrip_basic(self) -> None:
+        """A basic pickle round-trip preserves the value."""
         a = tvm_ffi.convert([1, 2, 3])
         s = pickle.dumps(a)
         b = pickle.loads(s)
         assert list(b) == [1, 2, 3]
 
     def test_pickle_roundtrip_preserves_attr_identity(self) -> None:
+        """A restored wrapper has stable attribute identity."""
         outer = Outer(Inner(77))
         s = pickle.dumps(outer)
         outer2 = pickle.loads(s)
@@ -449,16 +474,19 @@ class TestPyNativeExempt:
     """
 
     def test_string_construction_and_compare(self) -> None:
+        """A converted String behaves as a native str."""
         s = tvm_ffi.convert("hello")
         assert isinstance(s, str)
         assert s == "hello"
 
     def test_bytes_construction_and_compare(self) -> None:
+        """A converted Bytes behaves as native bytes."""
         b = tvm_ffi.convert(b"world")
         assert isinstance(b, bytes)
         assert b == b"world"
 
     def test_string_repeated_construction(self) -> None:
+        """Repeated String construction does not corrupt adjacent headers."""
         # Repeatedly constructing strings shouldn't break the header on
         # adjacent objects.
         for _ in range(100):
@@ -476,6 +504,7 @@ class TestTypeMismatchOnRevive:
     """
 
     def test_field_access_works_after_many_unrelated_registrations(self) -> None:
+        """Unrelated type registrations don't corrupt an existing binding."""
         outer = Outer(Inner(1))
         first_id = id(outer.x)
         # Register a bunch of unrelated classes (no shared chandle).
@@ -503,6 +532,7 @@ class TestFieldSetterAfterRevive:
     """
 
     def test_assign_then_access(self) -> None:
+        """Replacing a field after a revive cycle binds the new value cleanly."""
         outer = MutableOuter(Inner(1))
         first_inner = outer.x
         first_chandle = first_inner.__chandle__()
@@ -533,6 +563,7 @@ class TestPickleStress:
     """
 
     def test_many_roundtrips(self) -> None:
+        """Repeated pickle round-trips keep the binding state valid."""
         for _ in range(200):
             outer = Outer(Inner(7))
             restored = pickle.loads(pickle.dumps(outer))
@@ -540,6 +571,7 @@ class TestPickleStress:
             assert restored.x is restored.x  # Active on restored binding
 
     def test_roundtrip_then_state_c_revive(self) -> None:
+        """A pickle-installed binding survives a finalize-and-revive cycle."""
         # Round-trip, then exercise Inactive -> Active revive on the restored
         # wrapper to confirm the binding installed by pickle survives
         # finalize+rewrap.
@@ -562,8 +594,7 @@ class TestThreadingStress:
     """
 
     def test_concurrent_attr_access(self) -> None:
-        import threading
-
+        """Concurrent attribute access on a shared object does not crash."""
         outer = Outer(Inner(123))
         errors: list[BaseException] = []
 
@@ -582,12 +613,11 @@ class TestThreadingStress:
         assert not errors, f"worker(s) raised: {errors!r}"
 
     def test_concurrent_independent_outers(self) -> None:
+        """Concurrent wrapper churn on per-thread objects does not crash."""
         # Each thread owns its own Outer; threads don't share chandles
         # so the test mostly exercises wrapper churn (Active -> Inactive -> Active) in
         # isolation. ``gc.collect()`` is called periodically (not every
         # iteration) to keep the test under a few seconds.
-        import threading
-
         errors: list[BaseException] = []
 
         def worker(seed: int) -> None:
@@ -621,6 +651,7 @@ class TestStateCWithCyclicGC:
     """
 
     def test_gc_collect_inside_revive_loop(self) -> None:
+        """gc.collect() between drop and refetch does not crash."""
         outer = Outer(Inner(5))
         # A bad traversal of the untracked cached allocation crashes deterministically on
         # the first collect, so a modest count suffices; the cost here is the
@@ -632,6 +663,7 @@ class TestStateCWithCyclicGC:
         assert outer.x.val == 5
 
     def test_gc_collect_with_holder_keeping_chandle(self) -> None:
+        """gc.collect() around inactive memory keeps id() stable."""
         # The Inner chandle is held by ``outer``'s field for the lifetime
         # of the test, so wrapper drops always inactivate the allocation. gc.collect
         # between drops exercises GC stability around the inactive memory.
@@ -655,6 +687,7 @@ class TestMultipleChandlesIsolation:
     """
 
     def test_distinct_state_c_revive_independently(self) -> None:
+        """Each chandle revives to its own address and value independently."""
         outers = [Outer(Inner(i * 10)) for i in range(50)]
         # Capture Active addresses, then drop to Inactive.
         b_ids = [id(o.x) for o in outers]
@@ -667,6 +700,7 @@ class TestMultipleChandlesIsolation:
             assert revived.val == i * 10
 
     def test_interleaved_revives_do_not_cross_contaminate(self) -> None:
+        """Reviving in a different order keeps ids matched per-chandle."""
         # Build N outers, capture ids, drop all, then revive in a
         # different order. Ids must still match per-chandle.
         outers = [Outer(Inner(i)) for i in range(30)]
@@ -690,8 +724,7 @@ class TestWeakrefNotSupported:
     """
 
     def test_weakref_raises_typeerror(self) -> None:
-        import weakref
-
+        """Taking a weakref to a wrapper raises TypeError (documented limit)."""
         outer = Outer(Inner(1))
         with pytest.raises(TypeError):
             weakref.ref(outer.x)

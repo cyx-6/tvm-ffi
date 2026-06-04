@@ -41,12 +41,12 @@ void* BuiltinDefaultAllocate(size_t size, size_t alignment, int32_t /*type_index
   // Total bytes between malloc start and T must be a multiple of `alignment`
   // (so T is aligned). The header is sizeof(TVMFFIObjectAllocHeader) bytes;
   // if that's already enough, no leading pad. Otherwise round up.
-  const size_t total_offset =
-      (sizeof(TVMFFIObjectAllocHeader) + alignment - 1) & ~(alignment - 1);
+  const size_t total_offset = (sizeof(TVMFFIObjectAllocHeader) + alignment - 1) & ~(alignment - 1);
   const size_t total_size = total_offset + size;
   void* base_alloc = details::AlignedAllocRuntime(total_size, alignment);
   void* ptr = static_cast<char*>(base_alloc) + total_offset;
-  details::ObjectUnsafe::GetObjectAllocHeaderFromPtr(ptr)->delete_space = &BuiltinDefaultDeleteSpace;
+  details::ObjectUnsafe::GetObjectAllocHeaderFromPtr(ptr)->delete_space =
+      &BuiltinDefaultDeleteSpace;
   return ptr;
 }
 

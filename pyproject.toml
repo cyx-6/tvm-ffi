@@ -233,7 +233,15 @@ docstring-code-line-length = 80
 build-verbosity = 1
 
 # Per-Python-version wheels (no abi3 / limited API).
-build = ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*", "cp313-*", "cp314t-*"]
+build = [
+  "cp38-*",
+  "cp39-*",
+  "cp310-*",
+  "cp311-*",
+  "cp312-*",
+  "cp313-*",
+  "cp314t-*",
+]
 skip = ["*musllinux*"]
 # we only need to test on cp312
 test-skip = ["cp38-*", "cp39-*", "cp310-*", "cp311-*"]

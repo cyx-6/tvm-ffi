@@ -273,9 +273,9 @@ if (TVM_FFI_BUILD_PYTHON_MODULE)
     VERBATIM
   )
 
-  # The PyObject-tying impl in tvm_ffi_python_helpers.h uses full Python
-  # C API (Py_IncRef, PyObject_GC_Del, atomic header reads), so we build
-  # against the per-version ABI rather than the limited (abi3) ABI.
+  # The PyObject-tying impl in tvm_ffi_python_helpers.h uses full Python C API (Py_IncRef,
+  # PyObject_GC_Del, atomic header reads), so we build against the per-version ABI rather than the
+  # limited (abi3) ABI.
   python_add_library(tvm_ffi_cython MODULE "${_core_cpp}" WITH_SOABI)
   set_target_properties(tvm_ffi_cython PROPERTIES OUTPUT_NAME "core")
   target_include_directories(
