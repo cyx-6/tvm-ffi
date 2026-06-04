@@ -437,6 +437,11 @@ cdef inline object make_ret_opaque_object(TVMFFIAny result):
     (<CObject>obj).chandle = result.v_obj
     return obj.pyobject()
 
+cdef public void** TVMFFICyObjectGetCHandlePtr(PyObject* ptr) noexcept:
+    # Address of a CObject wrapper's ``chandle`` field, for the C++ helpers.
+    return &((<CObject>ptr).chandle)
+
+
 cdef inline void _install_pyobject_tying_slots(object type_cls):
     """Install the custom tp_alloc / tp_free PyObject-tying slots on a
     registered FFI type. No-op unless ``type_cls`` is a ``CObject`` subclass.

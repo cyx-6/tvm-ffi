@@ -75,6 +75,7 @@
 #include <iostream>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 ///--------------------------------------------------------------------------------
@@ -207,26 +208,20 @@ struct PyCustomAllocHeader {
   TVMFFIObjectAllocHeader base;
 };
 
-constexpr size_t kPyHeaderOffset = sizeof(PyCustomAllocHeader);  // 16
-static_assert(kPyHeaderOffset == 16,
+static_assert(sizeof(PyCustomAllocHeader) == 16,
               "header must be 16 bytes so T at ptr = malloc + 16 is naturally "
               "aligned for alignof(T) up to alignof(max_align_t)");
 static_assert(offsetof(PyCustomAllocHeader, base) ==
-                  kPyHeaderOffset - sizeof(TVMFFIObjectAllocHeader),
+                  sizeof(PyCustomAllocHeader) - sizeof(TVMFFIObjectAllocHeader),
               "base must sit at ptr - sizeof(TVMFFIObjectAllocHeader) for the "
               "C++ deleter to find it");
 
 TVM_FFI_INLINE PyCustomAllocHeader* TVMFFIPyHeader(void* ptr) {
-  return reinterpret_cast<PyCustomAllocHeader*>(static_cast<char*>(ptr) - kPyHeaderOffset);
+  return reinterpret_cast<PyCustomAllocHeader*>(static_cast<char*>(ptr) -
+                                                sizeof(PyCustomAllocHeader));
 }
 
 constexpr uintptr_t kPyCachedInactiveTagBit = 1;
-
-/*! \brief Marker armed on a wrapper's ``chandle`` field while its
- *         ``__dealloc__`` handshake is in flight (see "The dealloc handshake"
- *         above). A non-NULL, non-pointer value distinct from any real chandle
- *         (which is >= 16-aligned), so callbacks can tell it apart on sight. */
-#define TVM_FFI_PY_DEALLOC_TRANSIT (reinterpret_cast<void*>(static_cast<uintptr_t>(1)))
 
 TVM_FFI_INLINE bool TVMFFIPyTagIsInactive(PyObject* tagged) {
   return (reinterpret_cast<uintptr_t>(tagged) & kPyCachedInactiveTagBit) != 0;
@@ -243,18 +238,24 @@ TVM_FFI_INLINE PyObject* TVMFFIPyRemoveTag(PyObject* tagged) {
 /*!
  * \brief Per-thread vehicle carrying the inactive cached allocation address from
  *        ``make_ret_object`` (which knows the chandle) down into
- *        ``TVMFFIPyTpAlloc`` (which is handed only ``type`` and an item
- *        count). Per-thread -> free-threading safe; strict read-and-clear.
+ *        ``TVMFFIPyTpAlloc`` (which is handed only ``type`` and an item count).
+ *
+ * The slot's sole access primitive is a swap: store ``next``, return the prior
+ * value. Taking the block is thus ``TVMFFIPyTLSReviveSlot(nullptr)`` --
+ * read-and-clear in one step, with no separate clear to forget. Per-thread ->
+ * free-threading safe.
  */
-inline void*& TVMFFIPyTlsReviveSlot() {
-  static thread_local void* slot = nullptr;
-  return slot;
+inline PyObject* TVMFFIPyTLSReviveSlot(PyObject* next) {
+  static thread_local PyObject* slot = nullptr;
+  std::swap(slot, next);
+  return next;
 }
 
-/*! \brief Set the cached allocation to be reused by the next ``tp_alloc`` on this thread.
- *         Called by ``make_ret_object`` immediately before ``cls.__new__``. */
+/*! \brief Arm the cached allocation to be reused by the next ``tp_alloc`` on
+ *         this thread. Called by ``make_ret_object`` immediately before
+ *         ``cls.__new__``. */
 extern "C" TVM_FFI_INLINE void TVMFFIPySetReviveBlock(PyObject* cached_alloc) {
-  TVMFFIPyTlsReviveSlot() = cached_alloc;
+  TVMFFIPyTLSReviveSlot(cached_alloc);
 }
 
 // Forward decl; defined below.
@@ -317,6 +318,11 @@ extern "C" {
  *   (false, non-NULL) : Inactive -- revivable cached allocation.
  *   (true,  NULL)     : impossible -- a true (Active) return always has a
  *                       real wrapper, so ``*out`` is non-NULL on every hit.
+ *
+ * \param chandle The chandle to query.
+ * \param out Receives the usable (untagged) wrapper pointer, or NULL.
+ * \return Whether the returned PyObject state is Active (the live canonical
+ *         wrapper). False for Detached, Inactive, or non-Python chandles.
  */
 TVM_FFI_INLINE bool TVMFFIPyTryGetAttachedPyObject(void* chandle, PyObject** out) {
   if (!TVMFFIPyIsCanonical(chandle)) {
@@ -362,15 +368,17 @@ TVM_FFI_INLINE void TVMFFIPyDetachPyObject(void* chandle, PyObject* obj) {
 
 }  // extern "C"
 
-// Mirror of the Cython ``CObject`` struct head (``PyObject_HEAD; void*
-// chandle;``) used to read the ``chandle`` field (e.g. the ``DEALLOC_TRANSIT``
-// marker) without depending on the generated Cython header.
-struct TVMFFIPyCObjectHead {
-  PyObject ob_base;
-  void* chandle;
-};
+//---------------------------------------------------------------
+// Custom tp_alloc / tp_dealloc / tp_free and per-type slot installation.
+//
+// These run the dealloc handshake described in the section header above. They
+// are kept in execution order -- alloc, then dealloc, then free -- with the
+// DEALLOC_TRANSIT marker that couples dealloc and free declared between them.
+//---------------------------------------------------------------
 
-inline PyObject* TVMFFIPyTpAlloc(PyTypeObject* type, Py_ssize_t nitems);
+// Address of a CObject wrapper's ``chandle`` field, defined in object.pxi.
+__PYX_EXTERN_C void** TVMFFICyObjectGetCHandlePtr(PyObject* ptr);
+
 inline void TVMFFIPyTpFree(void* self);
 
 /*!
@@ -401,6 +409,55 @@ TVM_FFI_INLINE bool TVMFFIPyIsInactiveEligible(PyObject* wrapper) {
   if (tp->tp_finalize != nullptr) return false;
   return true;
 }
+
+/*!
+ * \brief Custom ``tp_alloc``. On the revival path (an inactive cached allocation was handed
+ *        to this thread via ``TVMFFIPySetReviveBlock``) it revives the cached allocation
+ *        in place — same address, so ``id()`` is stable — re-initializing it
+ *        to match ``PyType_GenericAlloc``'s contract. Otherwise (miss) it
+ *        forwards to ``PyType_GenericAlloc`` for a fresh, tracked object.
+ *
+ * Revive-path contract (must match what ``tp_new`` expects from
+ * ``PyType_GenericAlloc``):
+ *  1. zero the body ``[sizeof(PyObject), tp_basicsize)`` so ``__cinit__``
+ *     sees clean fields;
+ *  2. ``PyObject_Init`` -> ob_refcnt = 1, ob_type, INCREF(type);
+ *  3. ``PyObject_GC_Track`` -> GenericAlloc returns a *tracked* object and
+ *     ``tp_new`` does not track again, so the revive path must track.
+ * (No stale GC-finalized bit to clear: the design uses no tp_finalize.)
+ *
+ * Fixed-size only: ``PyObject_Init`` resets ``ob_refcnt``/``ob_type`` but not
+ * ``ob_size``. Every registered FFI wrapper is a fixed-size cdef class
+ * (``tp_itemsize == 0``), asserted below; a future variable-sized type would
+ * need ``PyObject_InitVar(.., nitems)`` here and a matching basicsize check.
+ */
+inline PyObject* TVMFFIPyTpAlloc(PyTypeObject* type, Py_ssize_t nitems) {
+  // Take the revive block and leave the slot NULL in one step (per-thread).
+  PyObject* blk = TVMFFIPyTLSReviveSlot(nullptr);
+  if (blk != nullptr) {
+    // REVIVAL: revive the inactive cached allocation at the same address. The body memset
+    // below assumes ``type->tp_basicsize`` equals the cached allocation's original
+    // basicsize. This holds because a chandle's ``type_index`` maps to one
+    // stable wrapper class for the life of the process, and ``make_ret_object``
+    // derives both the cached allocation (from the chandle) and ``type`` (= cls for that
+    // same type_index) from the very same chandle on the revival path.
+    assert(type->tp_itemsize == 0 &&
+           "cache-&-revive supports only fixed-size wrappers; a variable-sized "
+           "type needs PyObject_InitVar and a per-instance basicsize check");
+    std::memset(reinterpret_cast<char*>(blk) + sizeof(PyObject), 0,
+                static_cast<size_t>(type->tp_basicsize) - sizeof(PyObject));
+    PyObject_Init(blk, type);
+    PyObject_GC_Track(blk);
+    return blk;
+  }
+  return PyType_GenericAlloc(type, nitems);  // MISS: fresh (already tracked)
+}
+
+/*! \brief Marker armed on a wrapper's ``chandle`` field while its
+ *         ``__dealloc__`` handshake is in flight (see "The dealloc handshake"
+ *         above). A non-NULL, non-pointer value distinct from any real chandle
+ *         (which is >= 16-aligned), so callbacks can tell it apart on sight. */
+#define TVM_FFI_PY_DEALLOC_TRANSIT (reinterpret_cast<void*>(static_cast<uintptr_t>(1)))
 
 extern "C" {
 
@@ -452,54 +509,6 @@ TVM_FFI_INLINE void TVMFFIPyTpDealloc(void** ptr_to_chandle, PyObject* wrapper) 
 
 }  // extern "C"
 
-//---------------------------------------------------------------
-// Custom tp_alloc / tp_free and per-type slot installation.
-//---------------------------------------------------------------
-
-/*!
- * \brief Custom ``tp_alloc``. On the revival path (an inactive cached allocation was handed
- *        to this thread via ``TVMFFIPySetReviveBlock``) it revives the cached allocation
- *        in place — same address, so ``id()`` is stable — re-initializing it
- *        to match ``PyType_GenericAlloc``'s contract. Otherwise (miss) it
- *        forwards to ``PyType_GenericAlloc`` for a fresh, tracked object.
- *
- * Revive-path contract (must match what ``tp_new`` expects from
- * ``PyType_GenericAlloc``):
- *  1. zero the body ``[sizeof(PyObject), tp_basicsize)`` so ``__cinit__``
- *     sees clean fields;
- *  2. ``PyObject_Init`` -> ob_refcnt = 1, ob_type, INCREF(type);
- *  3. ``PyObject_GC_Track`` -> GenericAlloc returns a *tracked* object and
- *     ``tp_new`` does not track again, so the revive path must track.
- * (No stale GC-finalized bit to clear: the design uses no tp_finalize.)
- *
- * Fixed-size only: ``PyObject_Init`` resets ``ob_refcnt``/``ob_type`` but not
- * ``ob_size``. Every registered FFI wrapper is a fixed-size cdef class
- * (``tp_itemsize == 0``), asserted below; a future variable-sized type would
- * need ``PyObject_InitVar(.., nitems)`` here and a matching basicsize check.
- */
-inline PyObject* TVMFFIPyTpAlloc(PyTypeObject* type, Py_ssize_t nitems) {
-  void* blk = TVMFFIPyTlsReviveSlot();
-  TVMFFIPyTlsReviveSlot() = nullptr;  // strict read-and-clear (per-thread)
-  if (blk != nullptr) {
-    // REVIVAL: revive the inactive cached allocation at the same address. The body memset
-    // below assumes ``type->tp_basicsize`` equals the cached allocation's original
-    // basicsize. This holds because a chandle's ``type_index`` maps to one
-    // stable wrapper class for the life of the process, and ``make_ret_object``
-    // derives both the cached allocation (from the chandle) and ``type`` (= cls for that
-    // same type_index) from the very same chandle on the revival path.
-    assert(type->tp_itemsize == 0 &&
-           "cache-&-revive supports only fixed-size wrappers; a variable-sized "
-           "type needs PyObject_InitVar and a per-instance basicsize check");
-    PyObject* op = static_cast<PyObject*>(blk);
-    std::memset(static_cast<char*>(blk) + sizeof(PyObject), 0,
-                static_cast<size_t>(type->tp_basicsize) - sizeof(PyObject));
-    PyObject_Init(op, type);
-    PyObject_GC_Track(op);
-    return op;
-  }
-  return PyType_GenericAlloc(type, nitems);  // MISS: fresh (already tracked)
-}
-
 /*!
  * \brief Custom ``tp_free``, the second step of the dealloc handshake.
  *
@@ -513,9 +522,10 @@ inline PyObject* TVMFFIPyTpAlloc(PyTypeObject* type, Py_ssize_t nitems) {
  *    install on, GC or not.
  */
 inline void TVMFFIPyTpFree(void* self) {
-  if (reinterpret_cast<TVMFFIPyCObjectHead*>(self)->chandle == TVM_FFI_PY_DEALLOC_TRANSIT) {
+  void** chandle_ptr = TVMFFICyObjectGetCHandlePtr(static_cast<PyObject*>(self));
+  if (*chandle_ptr == TVM_FFI_PY_DEALLOC_TRANSIT) {
     // Keep cached Inactive; settle the marker so the allocation reads as such.
-    reinterpret_cast<TVMFFIPyCObjectHead*>(self)->chandle = nullptr;
+    *chandle_ptr = nullptr;
     return;
   }
   PyObject* op = static_cast<PyObject*>(self);
@@ -546,22 +556,23 @@ extern "C" TVM_FFI_INLINE void TVMFFIPyInstallTypeSlots(PyObject* type_obj) {
 
 /*!
  * \brief Allocator entry registered with TVMFFISetCustomAllocator at
- *        Cython module init. Allocates ``kPyHeaderOffset + size`` bytes
+ *        Cython module init. Allocates ``sizeof(PyCustomAllocHeader) + size`` bytes
  *        with ``alignment``, zero-inits the header to the Detached
  *        state, wires ``base.delete_space = &TVMFFIPyDeleteSpace``, and
  *        returns the T location.
  *
  * Handler::New static_asserts ``alignof(T) <= alignof(max_align_t)``, so
- * the runtime ``alignment`` is bounded and ``base + kPyHeaderOffset``
+ * the runtime ``alignment`` is bounded and ``base + sizeof(PyCustomAllocHeader)``
  * (= ``base + 16``) lands T naturally aligned for any T we allocate.
  */
 inline void* TVMFFIPyAllocate(size_t size, size_t alignment, int32_t /*type_index*/,
                               void* /*context*/) {
-  void* base_alloc = ::tvm::ffi::details::AlignedAllocRuntime(kPyHeaderOffset + size, alignment);
+  void* base_alloc =
+      ::tvm::ffi::details::AlignedAllocRuntime(sizeof(PyCustomAllocHeader) + size, alignment);
   auto* h = static_cast<PyCustomAllocHeader*>(base_alloc);
   h->tagged_pyobj = nullptr;  // Detached
   h->base.delete_space = &TVMFFIPyDeleteSpace;
-  return static_cast<char*>(base_alloc) + kPyHeaderOffset;
+  return static_cast<char*>(base_alloc) + sizeof(PyCustomAllocHeader);
 }
 
 /*!
@@ -582,17 +593,17 @@ inline void* TVMFFIPyAllocate(size_t size, size_t alignment, int32_t /*type_inde
  * block is freed.
  */
 inline void TVMFFIPyDeleteSpace(void* ptr) {
-  void* base_alloc = static_cast<char*>(ptr) - kPyHeaderOffset;
+  void* base_alloc = static_cast<char*>(ptr) - sizeof(PyCustomAllocHeader);
   auto* h = static_cast<PyCustomAllocHeader*>(base_alloc);
   if (TVMFFIPyTagIsInactive(h->tagged_pyobj) && TVMFFIPyIsPythonAlive()) {
     PyGILState_STATE gstate = PyGILState_Ensure();
     if (TVMFFIPyIsPythonAlive()) {
       // Mask off the Inactive tag to recover the real allocation pointer.
       PyObject* cached_alloc = TVMFFIPyRemoveTag(h->tagged_pyobj);
-      if (reinterpret_cast<TVMFFIPyCObjectHead*>(cached_alloc)->chandle ==
-          TVM_FFI_PY_DEALLOC_TRANSIT) {
+      void** cached_chandle_ptr = TVMFFICyObjectGetCHandlePtr(cached_alloc);
+      if (*cached_chandle_ptr == TVM_FFI_PY_DEALLOC_TRANSIT) {
         // This DecRef drove the free; defer the allocation free to tp_free.
-        reinterpret_cast<TVMFFIPyCObjectHead*>(cached_alloc)->chandle = nullptr;
+        *cached_chandle_ptr = nullptr;
       } else {
         // Chandle died independently; reclaim the cached allocation now.
         PyObject_GC_Del(cached_alloc);
