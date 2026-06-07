@@ -196,6 +196,20 @@
 // init. After it fires, inactive cached allocations on still-live chandles are
 // intentionally leaked (process exiting; OS reclaims) rather than reaching
 // for ``PyGILState_Ensure`` on a teardown interpreter.
+//
+// Free-threaded builds (``Py_GIL_DISABLED``)
+// ------------------------------------------
+// The state machine above is GIL-serialized: it reads and mutates
+// ``tagged_pyobj`` with no synchronization, so without the GIL the Active-hit
+// borrowed read races into a use-after-free. The feature is therefore disabled
+// wholesale on free-threaded builds at its two one-time setup gates
+// (``TVMFFIPyRegisterDefaultAllocator`` / ``TVMFFIPyInstallTypeSlots``, both
+// ``#ifdef``'d below). With neither the custom allocator nor the custom slots
+// installed, every chandle is non-canonical, so all helpers take their existing
+// no-op tail: ``make_ret_object`` returns a fresh wrapper and ``__dealloc__``
+// just releases its +1 -- the FT-safe behavior from before this feature, minus
+// identity stickiness (``a.x is a.x`` / stable ``id()``). The GIL build keeps
+// the gates active and is unchanged.
 //================================================================================
 
 /*!
@@ -544,10 +558,18 @@ inline void TVMFFIPyTpFree(void* self) {
  *        point. Idempotent. No-op when ``type_obj`` is not a type object.
  */
 extern "C" TVM_FFI_INLINE void TVMFFIPyInstallTypeSlots(PyObject* type_obj) {
+#ifdef Py_GIL_DISABLED
+  // Free-threaded: tying is disabled (see "Free-threaded builds" above). Leaving
+  // the stock slots in place keeps every chandle non-canonical, so the helpers
+  // no-op. Parameter referenced to avoid an unused-parameter warning.
+  (void)type_obj;
+  return;
+#else
   if (type_obj == nullptr || !PyType_Check(type_obj)) return;
   PyTypeObject* tp = reinterpret_cast<PyTypeObject*>(type_obj);
   tp->tp_alloc = &TVMFFIPyTpAlloc;
   tp->tp_free = &TVMFFIPyTpFree;
+#endif
 }
 
 //---------------------------------------------------------------
@@ -620,8 +642,16 @@ inline void TVMFFIPyDeleteSpace(void* ptr) {
  *        address is process-stable.
  */
 extern "C" TVM_FFI_INLINE int TVMFFIPyRegisterDefaultAllocator() {
+#ifdef Py_GIL_DISABLED
+  // Free-threaded: do not install the tying allocator (see "Free-threaded
+  // builds" above). libtvm_ffi's builtin default allocator stays in effect, so
+  // every chandle is non-canonical and the state-machine helpers no-op. Report
+  // success -- there is nothing to install and nothing can fail.
+  return 0;
+#else
   static TVMFFICustomAllocator allocator{&TVMFFIPyAllocate, /*context=*/nullptr};
   return TVMFFISetCustomAllocator(&allocator);
+#endif
 }
 
 //------------------------------------------------------------------------------------

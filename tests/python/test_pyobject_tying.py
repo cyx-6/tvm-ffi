@@ -42,6 +42,7 @@ from __future__ import annotations
 import gc
 import itertools
 import pickle
+import sys
 import threading
 import weakref
 from typing import Any
@@ -59,6 +60,23 @@ _counter = itertools.count()
 
 def _unique_key(base: str) -> str:
     return f"testing.pyobject_tying.{base}_{next(_counter)}"
+
+
+def _is_free_threaded_python() -> bool:
+    return hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
+
+
+# PyObject-tying (wrapper identity stickiness: ``a.x is a.x``, stable ``id()``
+# across drop+revive, ``f(x) is x``) relies on a custom allocator + tp_alloc /
+# tp_free slots whose header state machine is GIL-serialized. On free-threaded
+# builds the feature is disabled wholesale (see the "Free-threaded builds" note
+# in ``tvm_ffi_python_helpers.h``): correctness and value semantics are kept,
+# but identity stickiness is not. Tests that assert identity stickiness are
+# skipped there; value / no-crash / no-leak / distinctness tests stay active.
+requires_tying = pytest.mark.skipif(
+    _is_free_threaded_python(),
+    reason="PyObject-tying (wrapper identity stickiness) is disabled on free-threaded Python",
+)
 
 
 # Module-level fixtures so the registered types persist across all tests
@@ -83,6 +101,7 @@ class MutableOuter(dc.Object):
 # ---------------------------------------------------------------------------
 # Active: identity stable while wrapper is alive
 # ---------------------------------------------------------------------------
+@requires_tying
 class TestStateBIdStable:
     """``a.x is a.x`` and ``id(a.x)`` stable while ``a`` lives."""
 
@@ -120,6 +139,7 @@ class TestStateBIdStable:
 # ---------------------------------------------------------------------------
 # Universal cache-on: function returns alias the canonical wrapper
 # ---------------------------------------------------------------------------
+@requires_tying
 class TestStateBFunctionReturns:
     """Every FFI return funnels through ``make_ret_object``: the wrapper
     for a chandle that already has a canonical Python wrapper *is* that
@@ -147,6 +167,7 @@ class TestStateCRevive:
     cached field-getter path must reuse the preserved memory.
     """
 
+    @requires_tying
     def test_id_preserved_across_finalize(self) -> None:
         """id() and chandle survive a wrapper finalize-and-revive cycle."""
         outer = Outer(Inner(1))
@@ -160,6 +181,7 @@ class TestStateCRevive:
         assert id(revived) == first_id
         assert revived.__chandle__() == first_chandle
 
+    @requires_tying
     def test_id_preserved_across_many_drops(self) -> None:
         """Each drop+refetch cycle reuses the same wrapper address."""
         outer = Outer(Inner(1))
@@ -174,6 +196,7 @@ class TestStateCRevive:
             gc.collect()
             assert ref_id == first_id
 
+    @requires_tying
     def test_no_leak_churn_2k_cycles(self) -> None:
         """Revive must reuse exactly one address across many cycles."""
         outer = Outer(Inner(1))
@@ -330,6 +353,7 @@ class TestFinalizerNotInactivated:
             f"__del__ must fire on every drop of a finalizer type; saw {len(calls)}"
         )
 
+    @requires_tying
     def test_finalizer_type_value_correct_across_refetch(self) -> None:
         """A finalizer type's value and live identity hold across refetch."""
 
@@ -424,6 +448,7 @@ class TestRValueRef:
         discard(outer.x._move())
         assert outer.x.val == 5
 
+    @requires_tying
     def test_state_b_works_after_ffi_move(self) -> None:
         """Active caching resumes on a fresh wrapper after an FFI move."""
         # Eager-detach during the move clears the header binding, so
@@ -453,6 +478,7 @@ class TestPickle:
         b = pickle.loads(s)
         assert list(b) == [1, 2, 3]
 
+    @requires_tying
     def test_pickle_roundtrip_preserves_attr_identity(self) -> None:
         """A restored wrapper has stable attribute identity."""
         outer = Outer(Inner(77))
@@ -503,6 +529,7 @@ class TestTypeMismatchOnRevive:
     still hit Inactive for the original wrapper.
     """
 
+    @requires_tying
     def test_field_access_works_after_many_unrelated_registrations(self) -> None:
         """Unrelated type registrations don't corrupt an existing binding."""
         outer = Outer(Inner(1))
@@ -531,6 +558,7 @@ class TestFieldSetterAfterRevive:
     *previous* chandle (which may still be alive elsewhere).
     """
 
+    @requires_tying
     def test_assign_then_access(self) -> None:
         """Replacing a field after a revive cycle binds the new value cleanly."""
         outer = MutableOuter(Inner(1))
@@ -556,6 +584,7 @@ class TestFieldSetterAfterRevive:
 # ---------------------------------------------------------------------------
 # Pickle stress: repeated round-trips
 # ---------------------------------------------------------------------------
+@requires_tying
 class TestPickleStress:
     """Pickle round-trips go through ``__init_handle_by_constructor__``
     which calls ``_install_chandle_binding``. Repeated round-trips must
@@ -662,6 +691,7 @@ class TestStateCWithCyclicGC:
             gc.collect()  # cached allocation is inactive (untracked) between drops
         assert outer.x.val == 5
 
+    @requires_tying
     def test_gc_collect_with_holder_keeping_chandle(self) -> None:
         """gc.collect() around inactive memory keeps id() stable."""
         # The Inner chandle is held by ``outer``'s field for the lifetime
@@ -680,6 +710,7 @@ class TestStateCWithCyclicGC:
 # ---------------------------------------------------------------------------
 # Isolation: many distinct chandles each Inactive at once
 # ---------------------------------------------------------------------------
+@requires_tying
 class TestMultipleChandlesIsolation:
     """A revive on one chandle must not corrupt the cached binding on
     another. Each chandle's header is independent — verify by cycling

@@ -177,6 +177,10 @@ def test_global_func() -> None:
     assert tvm_ffi.get_global_func("mytest.echo", allow_missing=True) is None
 
 
+@pytest.mark.skipif(
+    hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled(),
+    reason="PyObject-tying (wrapper aliasing) is disabled on free-threaded Python",
+)
 def test_rvalue_ref() -> None:
     # Under universal cache-on the callback's arg aliases the caller's
     # wrapper, so use_count inside is 1 (one wrapper, one chandle ref).
