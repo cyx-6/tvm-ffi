@@ -106,15 +106,21 @@
 //                                                  ^ ptr = malloc + 16
 //
 // ``tagged_pyobj`` is a tagged pointer to the canonical Python wrapper. The
-// wrapper is >= 16-aligned, so its low bit is free to encode the state (see
-// below) without growing the header past its fixed 16 bytes.
+// wrapper is >= 16-aligned, so the low 4 bits are free; two encode the state
+// (see below) without growing the header past its fixed 16 bytes.
 //
 // States
 // ------
-//   Detached: ``tagged_pyobj == NULL`` -- no wrapper bound to this chandle.
-//   Active:   ``(tagged_pyobj & 1) == 0`` -- the live canonical wrapper.
-//   Inactive: ``(tagged_pyobj & 1) == 1`` -- dead, untracked allocation cached
-//             for address-stable revival.
+// Bit 0 (Inactive) and bit 1 (InTransit) tag ``tagged_pyobj`` into four states:
+//   Detached:  ``tagged_pyobj == NULL`` -- no wrapper bound to this chandle.
+//   Active:    ``ptr, bits == 00`` -- the live canonical wrapper.
+//   Inactive:  ``ptr | Inactive`` -- dead, untracked allocation cached for
+//              address-stable revival (settled).
+//   InTransit: ``ptr | Inactive | InTransit`` -- an Inactive allocation whose
+//              dealloc handshake is still in flight (see below). The Inactive
+//              bit stays set, so ``TVMFFIPyTagIsInactive`` matches it too.
+// The InTransit bit is a general-purpose "transition in flight" marker; in this
+// revision it is load-bearing only in the dealloc handshake.
 //
 // Invariants
 // ----------
@@ -123,52 +129,33 @@
 //       ``TVMFFIPyTpDealloc``).
 //   I2. When a chandle is destroyed, its cached allocation (if any) is
 //       reclaimed.
-//   I3. A PyObject whose ``chandle != NULL && != DEALLOC_TRANSIT`` owns
-//       +1 on that chandle, so any reader that follows such a ``chandle``
-//       observes a live object. ``DEALLOC_TRANSIT`` is set only transiently
-//       while a wrapper deallocs -- armed in ``TVMFFIPyTpDealloc``, cleared
-//       before the dealloc completes -- so no reader outside that window ever
-//       observes one.
-//   I4. Every ``PyObject*`` the Cython side passes to a helper here is a
-//       live wrapper (tag bit 0), never a value read back from
-//       ``tagged_pyobj``. Only this header ever sets or clears the tag.
+//   I3'. ``wrapper.chandle`` is only ever a real C++ object pointer or NULL,
+//       never a sentinel. A non-NULL chandle owns +1, except inside the
+//       wrapper's own dealloc window (where it is kept only as a header locator).
+//   I4. Every ``PyObject*`` the Cython side passes to a helper here is a live
+//       wrapper (tag bits 0); only this header sets or clears the tag bits.
 //
 // The dealloc handshake
 // ---------------------
-// When an eligible wrapper deallocs, its allocation should be *cached Inactive*
-// (kept for an address-stable revival) if the chandle outlives it, or
-// *genuinely freed* if the wrapper held the chandle's last reference. Reading
-// the chandle's refcount to decide would race a concurrent C++-side ``DecRef``
-// (FFI calls release the GIL), so ``TVMFFIPyTpDealloc`` does not read it.
-//
-// Instead it arms a ``DEALLOC_TRANSIT`` marker on ``wrapper.chandle`` and
-// ``DecRef``s unconditionally; whether the chandle's deleter fires during that
-// ``DecRef`` decides the outcome. The marker lets the three dealloc callbacks
-// coordinate:
-//
-//   Case 0 (chandle outlives us): the deleter does not fire; ``tp_free`` sees
-//     the marker and caches the allocation Inactive.
-//   Case 1 (wrapper held the last ref): the deleter (``TVMFFIPyDeleteSpace``)
-//     fires inside the ``DecRef`` and hands the genuine free back to ``tp_free``.
-//   Case 2 (cached allocation's chandle dies later): the deleter reclaims the
-//     allocation directly (``PyObject_GC_Del``).
+// When an eligible wrapper deallocs, its allocation is *cached Inactive* if the
+// chandle outlives it, or *genuinely freed* if the wrapper held the last ref.
+// ``TVMFFIPyTpDealloc`` cannot read the refcount to decide (an FFI ``DecRef`` may
+// race it with the GIL released), so it pre-tags ``Inactive | InTransit`` and
+// ``DecRef``s unconditionally. The InTransit bit, read by ``tp_free`` just after,
+// records whether the chandle's Weak deleter (``TVMFFIPyDeleteSpace``) fired:
+// still set => C++ alive, keep cached; cleared by the deleter => C++ dead, free.
 //
 // Where transitions happen
 // ------------------------
-// ``make_ret_object`` (object.pxi) -- the dispatcher; the only frame that
-// holds the chandle->wrapper mapping:
-//     Detached -> Active   : fresh wrapper; take the caller's +1, then attach.
-//     Active   -> Active   : return the cached wrapper as-is; drop the
-//                            caller's redundant +1.
-//     Inactive -> Active   : revive the cached allocation in place (stable
-//                            ``id()``); take the caller's +1, re-attach.
+// ``TVMFFIPyMakeRetObject`` (this header), behind ``make_ret_object``
+// (object.pxi) -- owns the whole return-object transition in one frame:
+//     Detached/Active/Inactive -> Active : fresh / cached / revived-in-place.
 //
 // ``TVMFFIPyTpDealloc`` (CObject.__dealloc__) -- runs when the wrapper's
 // refcount hits 0, before the free:
-//     Active   -> Inactive : type is inactive-eligible; pre-tag Inactive, arm
-//                            the DEALLOC_TRANSIT marker, DecRef. ``tp_free`` /
-//                            ``TVMFFIPyDeleteSpace`` finish the handshake (the
-//                            allocation is cached iff the chandle survived the DecRef).
+//     Active   -> Inactive : eligible; tag Inactive | InTransit, DecRef (the
+//                            handshake; ``tp_free`` / ``TVMFFIPyDeleteSpace``
+//                            settle it).
 //     Active   -> Detached : type not eligible; detach first, then DecRef.
 //
 // ``TVMFFIPyArgSetterObjectRValueRef_`` (function.pxi),
@@ -176,11 +163,9 @@
 //     Active   -> Detached : detach the binding before a move nulls the
 //                            source chandle.
 //
-// ``TVMFFIPyDeleteSpace`` (Weak deleter) -- the chandle's refcount hit 0:
-//     Inactive -> (gone)   : reclaim the cached allocation (``PyObject_GC_Del``)
-//                            and free the chandle's block -- unless our own
-//                            dealloc drove this free, when the DEALLOC_TRANSIT
-//                            marker defers the allocation free to ``tp_free``.
+// ``TVMFFIPyDeleteSpace`` (Weak deleter) -- the chandle's weak count hit 0:
+//     Inactive|InTransit   : in-flight dealloc; defer both frees to ``tp_free``.
+//     Inactive (settled)   : reclaim the cached wrapper and free the C++ block.
 //
 // Slot install
 // ------------
@@ -235,19 +220,27 @@ TVM_FFI_INLINE PyCustomAllocHeader* TVMFFIPyHeader(void* ptr) {
                                                 sizeof(PyCustomAllocHeader));
 }
 
+// Low-bit tags packed into ``tagged_pyobj`` (wrappers are >= 16-aligned):
+//   bit 0 (Inactive):  the bound wrapper is dead, its memory cached for revival.
+//   bit 1 (InTransit): a transition on this binding is in flight.
+// ``TVMFFIPyRemoveTag`` masks both to recover the real wrapper pointer.
 constexpr uintptr_t kPyCachedInactiveTagBit = 1;
+constexpr uintptr_t kPyInTransitTagBit = 2;
+constexpr uintptr_t kPyTagBitMask = kPyCachedInactiveTagBit | kPyInTransitTagBit;
 
 TVM_FFI_INLINE bool TVMFFIPyTagIsInactive(PyObject* tagged) {
   return (reinterpret_cast<uintptr_t>(tagged) & kPyCachedInactiveTagBit) != 0;
 }
-TVM_FFI_INLINE PyObject* TVMFFIPyRemoveTag(PyObject* tagged) {
-  return reinterpret_cast<PyObject*>(reinterpret_cast<uintptr_t>(tagged) &
-                                     ~kPyCachedInactiveTagBit);
+TVM_FFI_INLINE bool TVMFFIPyTagInTransit(PyObject* tagged) {
+  return (reinterpret_cast<uintptr_t>(tagged) & kPyInTransitTagBit) != 0;
 }
-// The two shared queries above (Inactive predicate, tag removal) stay helpers.
-// There is no Active tagger -- a live wrapper pointer already has tag bit 0 --
-// and the sole tag-set (Active -> Inactive) has one call site, inlined in
-// TVMFFIPyTpDealloc.
+TVM_FFI_INLINE PyObject* TVMFFIPyRemoveTag(PyObject* tagged) {
+  return reinterpret_cast<PyObject*>(reinterpret_cast<uintptr_t>(tagged) & ~kPyTagBitMask);
+}
+// Clear ONLY the InTransit bit (Inactive|InTransit -> Inactive, settled).
+TVM_FFI_INLINE PyObject* TVMFFIPyTagClearInTransit(PyObject* tagged) {
+  return reinterpret_cast<PyObject*>(reinterpret_cast<uintptr_t>(tagged) & ~kPyInTransitTagBit);
+}
 
 /*!
  * \brief Per-thread vehicle carrying the inactive cached allocation address from
@@ -386,14 +379,59 @@ TVM_FFI_INLINE void TVMFFIPyDetachPyObject(void* chandle, PyObject* obj) {
 // Custom tp_alloc / tp_dealloc / tp_free and per-type slot installation.
 //
 // These run the dealloc handshake described in the section header above. They
-// are kept in execution order -- alloc, then dealloc, then free -- with the
-// DEALLOC_TRANSIT marker that couples dealloc and free declared between them.
+// are kept in execution order -- alloc, then dealloc, then free -- coupled by
+// the InTransit bit in ``tagged_pyobj`` that dealloc arms and free settles.
 //---------------------------------------------------------------
 
 // Address of a CObject wrapper's ``chandle`` field, defined in object.pxi.
 __PYX_EXTERN_C void** TVMFFICyObjectGetCHandlePtr(PyObject* ptr);
 
 inline void TVMFFIPyTpFree(void* self);
+
+/*!
+ * \brief Wrap a returned ``chandle`` into its canonical Python wrapper -- the
+ *        whole Detached / Active / Inactive transition in one frame, behind
+ *        Cython's ``make_ret_object``.
+ *
+ * The caller owns +1 (strong) on ``chandle``; ownership transfers to the
+ * returned wrapper. Returns a new owned reference, or NULL with a Python error
+ * set (the Cython side declares this ``object``, so NULL propagates as an
+ * exception).
+ *
+ * \param chandle The returned object handle (caller owns +1 strong).
+ * \param cls_type The wrapper class to instantiate (a ``PyTypeObject*``).
+ * \return New owned wrapper reference, or NULL with a Python error set.
+ */
+extern "C" inline PyObject* TVMFFIPyMakeRetObject(void* chandle, PyObject* cls_type) {
+  PyObject* attached;
+  if (TVMFFIPyTryGetAttachedPyObject(chandle, &attached)) {
+    // Active hit: return the cached wrapper; drop the caller's redundant +1.
+    Py_INCREF(attached);
+    TVMFFIObjectDecRef(chandle);
+    return attached;
+  }
+  if (attached != nullptr) {
+    // Inactive: revive the cached allocation in place (stable id()).
+    TVMFFIPySetReviveBlock(attached);
+  }
+  PyObject* args = PyTuple_New(0);
+  if (args == nullptr) {
+    TVMFFIPySetReviveBlock(nullptr);  // disarm: tp_new will not run
+    TVMFFIObjectDecRef(chandle);
+    return nullptr;
+  }
+  PyTypeObject* tp = reinterpret_cast<PyTypeObject*>(cls_type);
+  PyObject* obj = tp->tp_new(tp, args, nullptr);
+  Py_DECREF(args);
+  TVMFFIPySetReviveBlock(nullptr);  // defensive: clear if tp_new bypassed tp_alloc
+  if (obj == nullptr) {
+    TVMFFIObjectDecRef(chandle);
+    return nullptr;
+  }
+  *TVMFFICyObjectGetCHandlePtr(obj) = chandle;
+  TVMFFIPyAttachPyObject(chandle, obj);
+  return obj;
+}
 
 /*!
  * \brief True iff a wrapper of ``wrapper``'s type may be cached & revived.
@@ -467,12 +505,6 @@ inline PyObject* TVMFFIPyTpAlloc(PyTypeObject* type, Py_ssize_t nitems) {
   return PyType_GenericAlloc(type, nitems);  // MISS: fresh (already tracked)
 }
 
-/*! \brief Marker armed on a wrapper's ``chandle`` field while its
- *         ``__dealloc__`` handshake is in flight (see "The dealloc handshake"
- *         above). A non-NULL, non-pointer value distinct from any real chandle
- *         (which is >= 16-aligned), so callbacks can tell it apart on sight. */
-#define TVM_FFI_PY_DEALLOC_TRANSIT (reinterpret_cast<void*>(static_cast<uintptr_t>(1)))
-
 extern "C" {
 
 /*!
@@ -490,10 +522,8 @@ extern "C" {
  */
 TVM_FFI_INLINE void TVMFFIPyTpDealloc(void** ptr_to_chandle, PyObject* wrapper) {
   void* chandle = *ptr_to_chandle;
-  // chandle already released -> nothing to do: an eager move
-  // (``__move_handle_from__`` / rvalue arg setter) detached it to NULL. A
-  // DEALLOC_TRANSIT marker never outlives its own dealloc chain, so it never
-  // surfaces on a fresh ``__dealloc__`` -- NULL is the only released state here.
+  // Already released by an eager move (detached to NULL); nothing to do. NULL is
+  // the only released state here -- the transit marker lives in ``tagged_pyobj``.
   if (chandle == nullptr) return;
   if (TVMFFIPyIsCanonical(chandle)) {
     PyCustomAllocHeader* h = TVMFFIPyHeader(chandle);
@@ -501,11 +531,11 @@ TVM_FFI_INLINE void TVMFFIPyTpDealloc(void** ptr_to_chandle, PyObject* wrapper) 
     // ours) is the live Active wrapper -- a plain `==` is the canonical check.
     if (h->tagged_pyobj == wrapper) {
       if (TVMFFIPyIsInactiveEligible(wrapper)) {
-        // Active -> Inactive (pending): set the tag bit (the only Inactive
-        // tag-set) and arm the transit marker, THEN DecRef. No count read.
+        // Active -> Inactive: tag Inactive | InTransit, then DecRef. ``chandle``
+        // keeps pointing at the C++ block as a header locator; ``tp_free`` reads
+        // the InTransit bit from there to settle the handshake.
         h->tagged_pyobj = reinterpret_cast<PyObject*>(reinterpret_cast<uintptr_t>(wrapper) |
-                                                      kPyCachedInactiveTagBit);
-        *ptr_to_chandle = TVM_FFI_PY_DEALLOC_TRANSIT;  // tp_free / deleter settle this
+                                                      kPyCachedInactiveTagBit | kPyInTransitTagBit);
         TVMFFIObjectDecRef(chandle);
         return;
       }
@@ -524,23 +554,28 @@ TVM_FFI_INLINE void TVMFFIPyTpDealloc(void** ptr_to_chandle, PyObject* wrapper) 
 }  // extern "C"
 
 /*!
- * \brief Custom ``tp_free``, the second step of the dealloc handshake.
- *
- *  - ``chandle == DEALLOC_TRANSIT``: the chandle outlived the DecRef, so keep
- *    the allocation cached Inactive for a future revival. Settle the marker to
- *    NULL so a later cross-thread deleter reads a fully Inactive allocation,
- *    and skip the real free.
- *  - otherwise (``chandle == NULL``): a genuine free -- the type was never
- *    eligible, or the deleter already deferred the free here. Mirror CPython's
- *    default, dispatching on GC-ness so it stays correct for every type we
- *    install on, GC or not.
+ * \brief Custom ``tp_free``, the second step of the dealloc handshake. The
+ *        InTransit bit (read here) says whether the chandle's deleter fired
+ *        during the ``TVMFFIPyTpDealloc`` DecRef: still set => keep the
+ *        allocation cached Inactive; cleared => free the C++ block too. The
+ *        ``chandle == NULL`` / non-canonical path is a plain genuine free,
+ *        dispatching on GC-ness like CPython's default.
  */
 inline void TVMFFIPyTpFree(void* self) {
   void** chandle_ptr = TVMFFICyObjectGetCHandlePtr(static_cast<PyObject*>(self));
-  if (*chandle_ptr == TVM_FFI_PY_DEALLOC_TRANSIT) {
-    // Keep cached Inactive; settle the marker so the allocation reads as such.
+  void* chandle = *chandle_ptr;
+  if (chandle != nullptr && TVMFFIPyIsCanonical(chandle)) {
+    // Read the header (in the C++ block) BEFORE any free below.
+    PyCustomAllocHeader* h = TVMFFIPyHeader(chandle);
+    if (TVMFFIPyTagInTransit(h->tagged_pyobj)) {
+      // Case 0: chandle outlived us -- settle to stable Inactive, keep cached.
+      h->tagged_pyobj = TVMFFIPyTagClearInTransit(h->tagged_pyobj);
+      *chandle_ptr = nullptr;
+      return;
+    }
+    // Case 1: deleter fired and deferred the block free to us (its sole free).
     *chandle_ptr = nullptr;
-    return;
+    ::tvm::ffi::details::AlignedFree(static_cast<char*>(chandle) - sizeof(PyCustomAllocHeader));
   }
   PyObject* op = static_cast<PyObject*>(self);
   if (PyObject_IS_GC(op)) {
@@ -598,40 +633,37 @@ inline void* TVMFFIPyAllocate(size_t size, size_t alignment, int32_t /*type_inde
 }
 
 /*!
- * \brief delete_space callback installed by TVMFFIPyAllocate, invoked from the
- *        C++ Weak deleter when the chandle's block is freed -- the final step
- *        of the dealloc handshake (Cases 1 and 2 above decide who frees the
- *        allocation, off the allocation's ``chandle`` marker).
- *
- * Acts only on a bound Inactive cached allocation (tag 1); an Active binding
- * cannot reach here (a live wrapper owns +1, so the chandle cannot die), and
- * guarding on the tag makes a stray Active binding a safe leak, not a UAF.
- *
- * Reading the marker under the GIL is load-bearing: it orders this read after
- * the caching thread's ``tp_free`` NULL-write (also under the GIL), so a
- * cross-thread last-ref never observes a stale marker. The chandle's malloc
- * block is freed in all cases; once Python is finalizing
- * (``TVMFFIPyIsPythonAlive() == false``) the allocation is leaked and only that
- * block is freed.
+ * \brief delete_space callback (installed by TVMFFIPyAllocate), invoked from the
+ *        C++ Weak deleter when the chandle's block's weak count hits 0. On an
+ *        Inactive binding it reads the InTransit bit: set => an in-flight
+ *        ``tp_free`` will free the block, so defer (keep it readable); clear =>
+ *        reclaim the cached wrapper and free the block here. Detached just frees
+ *        the block. The InTransit read is GIL-ordered against ``tp_free``'s
+ *        clear so a cross-thread last-ref never defers a freed block; during
+ *        teardown the same-thread defer still holds and stray cases only leak.
  */
 inline void TVMFFIPyDeleteSpace(void* ptr) {
   void* base_alloc = static_cast<char*>(ptr) - sizeof(PyCustomAllocHeader);
   auto* h = static_cast<PyCustomAllocHeader*>(base_alloc);
-  if (TVMFFIPyTagIsInactive(h->tagged_pyobj) && TVMFFIPyIsPythonAlive()) {
-    PyGILState_STATE gstate = PyGILState_Ensure();
+  if (TVMFFIPyTagIsInactive(h->tagged_pyobj)) {
     if (TVMFFIPyIsPythonAlive()) {
-      // Mask off the Inactive tag to recover the real allocation pointer.
-      PyObject* cached_alloc = TVMFFIPyRemoveTag(h->tagged_pyobj);
-      void** cached_chandle_ptr = TVMFFICyObjectGetCHandlePtr(cached_alloc);
-      if (*cached_chandle_ptr == TVM_FFI_PY_DEALLOC_TRANSIT) {
-        // This DecRef drove the free; defer the allocation free to tp_free.
-        *cached_chandle_ptr = nullptr;
-      } else {
-        // Chandle died independently; reclaim the cached allocation now.
-        PyObject_GC_Del(cached_alloc);
+      PyGILState_STATE gstate = PyGILState_Ensure();
+      if (TVMFFIPyIsPythonAlive()) {
+        if (TVMFFIPyTagInTransit(h->tagged_pyobj)) {
+          // In-flight: defer both frees to tp_free; keep the block.
+          h->tagged_pyobj = TVMFFIPyTagClearInTransit(h->tagged_pyobj);
+          PyGILState_Release(gstate);
+          return;
+        }
+        // Settled: reclaim the cached wrapper, then free the block below.
+        PyObject_GC_Del(TVMFFIPyRemoveTag(h->tagged_pyobj));
       }
+      PyGILState_Release(gstate);
+    } else if (TVMFFIPyTagInTransit(h->tagged_pyobj)) {
+      // Teardown, same-thread in-flight: defer the block free (no GIL needed).
+      h->tagged_pyobj = TVMFFIPyTagClearInTransit(h->tagged_pyobj);
+      return;
     }
-    PyGILState_Release(gstate);
   }
   ::tvm::ffi::details::AlignedFree(base_alloc);
 }

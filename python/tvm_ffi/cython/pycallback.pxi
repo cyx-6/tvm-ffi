@@ -236,7 +236,7 @@ cdef int TVMFFIPyCallbackArgSetterRValueRef_(
         else:
             # The rvalue setter on the caller side already eager-detached
             # the source wrapper's binding via TVMFFIPyDetachPyObject, so
-            # this chandle is Init — make_ret_object allocates a fresh
+            # this chandle is Detached — make_ret_object allocates a fresh
             # canonical wrapper and Attaches it.
             obj = make_ret_object(synthesized)
             if api != NULL and isinstance(obj, CContainerBase):

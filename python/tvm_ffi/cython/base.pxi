@@ -364,13 +364,12 @@ cdef extern from "tvm_ffi_python_helpers.h":
     int TVMFFIPyRegisterDefaultAllocator() noexcept
     void TVMFFIPyMarkPythonFinalizing() noexcept
 
-    bint TVMFFIPyTryGetAttachedPyObject(void* chandle, PyObject** out) noexcept
     bint TVMFFIPyIsDetached(void* chandle) noexcept
     void TVMFFIPyAttachPyObject(void* chandle, PyObject* obj) noexcept
     void TVMFFIPyDetachPyObject(void* chandle, PyObject* obj) noexcept
     void TVMFFIPyTpDealloc(void** ptr_to_chandle, PyObject* wrapper) noexcept
-    void TVMFFIPySetReviveBlock(PyObject* cached_alloc) noexcept
     void TVMFFIPyInstallTypeSlots(PyObject* type_obj) noexcept
+    object TVMFFIPyMakeRetObject(void* chandle, PyObject* cls_type)
 
     # no need to expose fields of the call context setter data structure
     ctypedef struct TVMFFIPyCallContext:

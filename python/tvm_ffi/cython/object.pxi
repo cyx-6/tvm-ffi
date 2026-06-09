@@ -490,11 +490,13 @@ cdef inline object make_ret_object(TVMFFIAny result):
     """Wrap a returned chandle into its canonical Python wrapper.
 
     Caller must own +1 on ``result.v_obj``; ownership transfers to the
-    returned wrapper. This is the cache-&-revive dispatcher.
+    returned wrapper. The Active / Inactive / Detached transition is owned in
+    one frame by ``TVMFFIPyMakeRetObject`` (tvm_ffi_python_helpers.h); this
+    dispatcher only resolves ``cls`` and peels off the value-typed
+    ``PyNativeObject`` case, which does not participate in tying.
     """
     cdef int32_t type_index = result.type_index
-    cdef object cls, obj, cached
-    cdef PyObject* attached_ptr
+    cdef object cls, obj
 
     if type_index < len(TYPE_INDEX_TO_CLS) and (cls := TYPE_INDEX_TO_CLS[type_index]) is not None:
         if issubclass(cls, PyNativeObject):
@@ -503,29 +505,11 @@ cdef inline object make_ret_object(TVMFFIAny result):
             obj = Object.__new__(Object)
             (<CObject>obj).chandle = result.v_obj
             return cls.__from_tvm_ffi_object__(cls, obj)
-        # ``attached_ptr`` is the usable (untagged) wrapper; the bool says Active.
-        if TVMFFIPyTryGetAttachedPyObject(result.v_obj, &attached_ptr):
-            # LIVE HIT: cached wrapper is alive and already owns a +1;
-            # drop the caller's redundant +1 and return it.
-            cached = <object>attached_ptr
-            CHECK_CALL(TVMFFIObjectDecRef(result.v_obj))
-            return cached
-        if attached_ptr != NULL:
-            # REVIVAL: revive the inactive cached allocation in place so ``id()`` stays
-            # stable; tp_alloc (via cls.__new__) reinitializes it there.
-            TVMFFIPySetReviveBlock(attached_ptr)
-            obj = cls.__new__(cls)
-            # Defensive: clear the slot in case cls.__new__ bypassed tp_alloc.
-            TVMFFIPySetReviveBlock(<PyObject*>NULL)
-            (<CObject>obj).chandle = result.v_obj
-            TVMFFIPyAttachPyObject(result.v_obj, <PyObject*>obj)
-            return obj
     else:
         cls = make_fallback_cls_for_type_index(type_index)
-    obj = cls.__new__(cls)
-    (<CObject>obj).chandle = result.v_obj
-    TVMFFIPyAttachPyObject(result.v_obj, <PyObject*>obj)
-    return obj
+    # Single choke point for the tying transition. Declared returning ``object``,
+    # so Cython adopts the owned reference and a NULL return raises.
+    return TVMFFIPyMakeRetObject(result.v_obj, <PyObject*>cls)
 
 
 cdef _get_method_from_method_info(const TVMFFIMethodInfo* method):
