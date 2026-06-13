@@ -234,10 +234,6 @@ cdef int TVMFFIPyCallbackArgSetterRValueRef_(
         if actual_type_index == kTVMFFITensor:
             obj = make_tensor_from_chandle(chandle, api)
         else:
-            # The rvalue setter on the caller side already eager-detached
-            # the source wrapper's binding via TVMFFIPyDetachPyObject, so
-            # this chandle is Detached — make_ret_object allocates a fresh
-            # canonical wrapper and Attaches it.
             obj = make_ret_object(synthesized)
             if api != NULL and isinstance(obj, CContainerBase):
                 (<CContainerBase>obj)._dlpack_exchange_api = api

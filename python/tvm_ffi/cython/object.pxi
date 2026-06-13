@@ -173,11 +173,9 @@ cdef class CObject:
 
     def __move_handle_from__(self, other: CObject) -> None:
         cdef void* chandle = (<CObject>other).chandle
-        TVMFFIPyDetachPyObject(chandle, <PyObject*>other)
         self.chandle = chandle
         (<CObject>other).chandle = NULL
-        if TVMFFIPyIsDetached(chandle):
-            TVMFFIPyAttachPyObject(chandle, <PyObject*>self)
+        TVMFFIPyRebindPyObject(chandle, <PyObject*>other, <PyObject*>self)
 
     def __init_handle_by_constructor__(self, fconstructor: Any, *args: Any) -> None:
         # avoid error raised during construction.
@@ -186,8 +184,8 @@ cdef class CObject:
         ConstructorCall(
             (<CObject>fconstructor).chandle, <PyObject*>args, &chandle, NULL)
         self.chandle = chandle
-        if TVMFFIPyIsDetached(chandle):
-            TVMFFIPyAttachPyObject(chandle, <PyObject*>self)
+        # Attach self as the canonical wrapper iff the chandle is Detached (expect=NULL).
+        TVMFFIPyRebindPyObject(chandle, NULL, <PyObject*>self)
 
 
 cdef class CContainerBase(CObject):
@@ -380,6 +378,9 @@ cdef class OpaquePyObject(CObject):
         py_handle = <PyObject*>(TVMFFIOpaqueObjectGetCellPtr(self.chandle).handle)
         obj = <object>py_handle
         return obj
+
+
+TVMFFIPyInstallTypeSlotsForOpaque(<PyObject*>OpaquePyObject)
 
 
 class PyNativeObject:

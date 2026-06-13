@@ -553,9 +553,7 @@ cdef int TVMFFIPyArgSetterObjectRValueRef_(
     #     but chandle is no longer attached to PyObject
     # we need to carefully handle chandle and PyObject recycling in both cases.
     # These logics are implemented in TVMFFIPyTpDealloc (CObject.__dealloc__).
-    # NOTE: TVMFFIPyDetachPyObject is robust to cases where the Object is not
-    # allocated by the custom Python allocator.
-    TVMFFIPyDetachPyObject(src.chandle, <PyObject*>src)
+    TVMFFIPyRebindPyObject(src.chandle, <PyObject*>src, NULL)
     out.type_index = kTVMFFIObjectRValueRef
     out.v_ptr = &(src.chandle)
     return 0

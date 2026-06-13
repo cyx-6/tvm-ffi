@@ -66,17 +66,12 @@ def _is_free_threaded_python() -> bool:
     return hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
 
 
-# PyObject-tying (wrapper identity stickiness: ``a.x is a.x``, stable ``id()``
-# across drop+revive, ``f(x) is x``) relies on a custom allocator + tp_alloc /
-# tp_free slots whose header state machine is GIL-serialized. On free-threaded
-# builds the feature is disabled wholesale (see the "Free-threaded builds" note
-# in ``tvm_ffi_python_helpers.h``): correctness and value semantics are kept,
-# but identity stickiness is not. Tests that assert identity stickiness are
-# skipped there; value / no-crash / no-leak / distinctness tests stay active.
-requires_tying = pytest.mark.skipif(
-    _is_free_threaded_python(),
-    reason="PyObject-tying (wrapper identity stickiness) is disabled on free-threaded Python",
-)
+# PyObject-tying (wrapper identity stickiness: ``a.x is a.x``, stable ``id()`` across
+# drop+revive, ``f(x) is x``) relies on a custom allocator + tp_alloc / tp_free /
+# tp_dealloc slots whose header state machine is GIL-serialized on the classic build
+# and lock-synchronized on free-threaded builds (see the "Free-threaded builds" note
+# in ``tvm_ffi_python_helpers.h``). The feature is enabled on both, so the identity
+# tests below run unconditionally on every build.
 
 
 # Module-level fixtures so the registered types persist across all tests
@@ -101,7 +96,6 @@ class MutableOuter(dc.Object):
 # ---------------------------------------------------------------------------
 # Active: identity stable while wrapper is alive
 # ---------------------------------------------------------------------------
-@requires_tying
 class TestStateBIdStable:
     """``a.x is a.x`` and ``id(a.x)`` stable while ``a`` lives."""
 
@@ -139,7 +133,6 @@ class TestStateBIdStable:
 # ---------------------------------------------------------------------------
 # Universal cache-on: function returns alias the canonical wrapper
 # ---------------------------------------------------------------------------
-@requires_tying
 class TestStateBFunctionReturns:
     """Every FFI return funnels through ``make_ret_object``: the wrapper
     for a chandle that already has a canonical Python wrapper *is* that
@@ -167,7 +160,6 @@ class TestStateCRevive:
     cached field-getter path must reuse the preserved memory.
     """
 
-    @requires_tying
     def test_id_preserved_across_finalize(self) -> None:
         """id() and chandle survive a wrapper finalize-and-revive cycle."""
         outer = Outer(Inner(1))
@@ -181,7 +173,6 @@ class TestStateCRevive:
         assert id(revived) == first_id
         assert revived.__chandle__() == first_chandle
 
-    @requires_tying
     def test_id_preserved_across_many_drops(self) -> None:
         """Each drop+refetch cycle reuses the same wrapper address."""
         outer = Outer(Inner(1))
@@ -196,7 +187,6 @@ class TestStateCRevive:
             gc.collect()
             assert ref_id == first_id
 
-    @requires_tying
     def test_no_leak_churn_2k_cycles(self) -> None:
         """Revive must reuse exactly one address across many cycles."""
         outer = Outer(Inner(1))
@@ -353,7 +343,6 @@ class TestFinalizerNotInactivated:
             f"__del__ must fire on every drop of a finalizer type; saw {len(calls)}"
         )
 
-    @requires_tying
     def test_finalizer_type_value_correct_across_refetch(self) -> None:
         """A finalizer type's value and live identity hold across refetch."""
 
@@ -448,7 +437,6 @@ class TestRValueRef:
         discard(outer.x._move())
         assert outer.x.val == 5
 
-    @requires_tying
     def test_state_b_works_after_ffi_move(self) -> None:
         """Active caching resumes on a fresh wrapper after an FFI move."""
         # Eager-detach during the move clears the header binding, so
@@ -478,7 +466,6 @@ class TestPickle:
         b = pickle.loads(s)
         assert list(b) == [1, 2, 3]
 
-    @requires_tying
     def test_pickle_roundtrip_preserves_attr_identity(self) -> None:
         """A restored wrapper has stable attribute identity."""
         outer = Outer(Inner(77))
@@ -529,7 +516,6 @@ class TestTypeMismatchOnRevive:
     still hit Inactive for the original wrapper.
     """
 
-    @requires_tying
     def test_field_access_works_after_many_unrelated_registrations(self) -> None:
         """Unrelated type registrations don't corrupt an existing binding."""
         outer = Outer(Inner(1))
@@ -558,7 +544,6 @@ class TestFieldSetterAfterRevive:
     *previous* chandle (which may still be alive elsewhere).
     """
 
-    @requires_tying
     def test_assign_then_access(self) -> None:
         """Replacing a field after a revive cycle binds the new value cleanly."""
         outer = MutableOuter(Inner(1))
@@ -584,7 +569,6 @@ class TestFieldSetterAfterRevive:
 # ---------------------------------------------------------------------------
 # Pickle stress: repeated round-trips
 # ---------------------------------------------------------------------------
-@requires_tying
 class TestPickleStress:
     """Pickle round-trips go through ``__init_handle_by_constructor__``
     which calls ``_install_chandle_binding``. Repeated round-trips must
@@ -668,6 +652,261 @@ class TestThreadingStress:
             t.join()
         assert not errors, f"worker(s) raised: {errors!r}"
 
+    def test_concurrent_shared_churn_no_crash(self) -> None:
+        """Many threads hammering ``outer.x`` on ONE shared object must not crash.
+
+        This is the high-pressure free-threaded reproducer: a single ``Outer`` is
+        shared across all threads, so every thread's ``outer.x`` drop+refetch races
+        the others' through the same ``tagged_pyobj`` word. The cached ``Inner``
+        wrapper churns Active <-> Inactive while ``make_ret`` Active-hits read it and
+        ``tp_dealloc`` mutates it. On free-threaded builds with no synchronization
+        this segfaults within ~1s; it is the exact race the lock-synchronized state
+        machine plus the pre-bump ``tp_dealloc`` binding-clear close. Also asserts the
+        live wrapper identity (``outer.x is outer.x``) holds under contention.
+        """
+        outer = Outer(Inner(123))
+        # More threads than cores maximizes interleaving; iteration count is sized to
+        # surface the crash reliably on FT while keeping the GIL build well under a
+        # second. Drop the count a bit on the GIL build (the race cannot occur there).
+        nthreads = 16
+        iters = 20_000 if _is_free_threaded_python() else 2_000
+        barrier = threading.Barrier(nthreads)
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                barrier.wait()
+                for _ in range(iters):
+                    a = outer.x  # Detached/Inactive -> Active, or Active hit
+                    b = outer.x  # Active hit on the just-installed wrapper
+                    assert a is b, "live wrapper identity must hold under contention"
+                    assert a.val == 123
+                    del a, b
+            except BaseException as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(nthreads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, f"worker(s) raised: {errors!r}"
+
+
+# ---------------------------------------------------------------------------
+# Concurrent churn across the cdef carrier family (not just dataclass Inner)
+# ---------------------------------------------------------------------------
+class TestConcurrentCarrierTypes:
+    """The earlier shared-churn test races a single shape (a dataclass ``Inner``
+    behind ``Outer.x``). But the free-threaded pre-bump ``tp_dealloc`` slot is
+    installed on the *whole* closed cdef ``CObject`` family — ``Function``,
+    ``Error``, and (via ``subtype_dealloc`` base-walk) multi-level heap subtypes —
+    each reached through ``TVMFFIPyNearestCdefBase``. This races those carrier
+    paths so a regression in the slot routing of any one of them surfaces, not
+    only the dataclass path.
+
+    Each carrier is held alive by a stable container/holder and re-fetched
+    concurrently; the Active-hit must always alias the canonical wrapper
+    (``acc() is acc()``) and never crash. Iteration count is FT-scaled: the race
+    is impossible under the GIL, so the classic build runs a light smoke pass.
+    """
+
+    def _race(self, acc: Any, value: Any) -> None:
+        nthreads = 8
+        iters = 4000 if _is_free_threaded_python() else 400
+        barrier = threading.Barrier(nthreads)
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                barrier.wait()
+                for _ in range(iters):
+                    a = acc()  # Active hit on the carrier's canonical wrapper
+                    b = acc()
+                    assert a is b, "carrier active-hit identity must hold under contention"
+                    if value is not None:
+                        assert a.a == value
+                    del a, b
+            except BaseException as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(nthreads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, f"worker(s) raised: {errors!r}"
+
+    def test_concurrent_function_carrier(self) -> None:
+        """Concurrent re-fetch of a Function carrier aliases one wrapper, no crash."""
+        # A converted callable is an ``ffi.Function`` (a cdef CObject carrier).
+        # Pinned in a container so its chandle stays alive across the race.
+        box = tvm_ffi.convert([tvm_ffi.convert(lambda z: z)])
+        self._race(lambda: box[0], None)
+
+    def test_concurrent_error_carrier(self) -> None:
+        """Concurrent re-fetch of an Error carrier aliases one wrapper, no crash."""
+        # ``ffi.Error`` is a cdef CObject carrier with its own dealloc thunk.
+        err = tvm_ffi.convert(ValueError("boom"))
+        box = tvm_ffi.convert([err])
+        self._race(lambda: box[0], None)
+
+    def test_concurrent_multilevel_heap_subtype(self) -> None:
+        """Concurrent churn of a 2-level heap dataclass routes through the cdef slot.
+
+        ``Derived`` is a heap subtype of the heap dataclass ``Base``; its
+        ``tp_dealloc`` is CPython's ``subtype_dealloc``, which base-walks to the
+        nearest cdef ancestor's slot (where we installed the pre-bump hook). This
+        races that two-level base-walk routing under contention.
+        """
+
+        @dc.py_class(_unique_key("CarrierBase"))
+        class Base(dc.Object):
+            a: int
+
+        @dc.py_class(_unique_key("CarrierDerived"))
+        class Derived(Base):
+            pass
+
+        @dc.py_class(_unique_key("CarrierHolder"))
+        class Holder(dc.Object):
+            x: Base
+
+        holder = Holder(Derived(9))
+        self._race(lambda: holder.x, 9)
+
+
+# ---------------------------------------------------------------------------
+# OpaquePyObject carrier: the registration-bypass cdef type
+# ---------------------------------------------------------------------------
+class TestOpaquePyObjectCarrier:
+    """``OpaquePyObject`` carries an arbitrary (non-FFI) Python value across the
+    FFI boundary. It is the one cdef ``CObject`` carrier built via ``__new__``
+    that bypasses the type-registration funnel, so on free-threaded builds it is
+    slot-wrapped explicitly at init (``TVMFFIPyInstallTypeSlotsForOpaque``) to keep
+    pre-bump dealloc coverage of the cdef family total. These tests guard that the
+    opaque round-trip preserves identity and that its (slot-wrapped) dealloc is
+    crash-free under churn — the committed regression guard for that wrap.
+    """
+
+    def test_opaque_roundtrip_preserves_identity(self) -> None:
+        """A Python value round-tripped through an FFI echo is the same object."""
+        # A non-convertible Python value traverses as OpaquePyObject under the hood;
+        # an identity callback must hand back the very same object.
+        echo = tvm_ffi.convert(lambda x: x)
+
+        class Payload:
+            __slots__ = ("v",)
+
+            def __init__(self, v: int) -> None:
+                self.v = v
+
+        p = Payload(7)
+        r = echo(p)
+        assert r is p
+        assert r.v == 7
+
+    def test_opaque_roundtrip_does_not_leak(self) -> None:
+        """An echoed payload is reclaimed after drop — the carrier DecRef runs.
+
+        This is the teeth for the FT ``OpaquePyObject`` slot wrap
+        (``TVMFFIPyInstallTypeSlotsForOpaque``). With ``TVMFFIPyTpDealloc`` an
+        unconditional FT no-op, an *unwrapped* OpaquePyObject would never run its
+        chandle DecRef, so the wrapper (and the Python value it holds) would leak
+        rather than crash. A weakref to each payload observing death confirms the
+        pre-bump slot's DecRef fired. (Holds on the GIL build too, where the
+        DecRef runs from ``__dealloc__``.)
+        """
+        echo = tvm_ffi.convert(lambda x: x)
+
+        class Payload:
+            __slots__ = ("__weakref__", "v")
+
+            def __init__(self, v: int) -> None:
+                self.v = v
+
+        refs: list[weakref.ref[Any]] = []
+        for i in range(50):
+            p = Payload(i)
+            wr = weakref.ref(p)
+            r = echo(p)  # p crosses the FFI as an OpaquePyObject
+            assert r is p
+            del r, p
+            refs.append(wr)
+        gc.collect()
+        leaked = sum(1 for wr in refs if wr() is not None)
+        assert leaked == 0, (
+            f"OpaquePyObject carrier leaked {leaked}/50 payloads (its dealloc DecRef "
+            f"did not run -- on FT, the InstallTypeSlotsForOpaque wrap is missing)"
+        )
+
+    def test_opaque_explicit_wrapper_recovers_value(self) -> None:
+        """An explicit OpaquePyObject recovers its held value via ``pyobject()``."""
+        # Exercises the OpaquePyObject wrapper type directly (the slot-wrapped
+        # carrier), including its construct + dealloc on every iteration.
+        sentinel = object()
+        for _ in range(200):
+            op = tvm_ffi.core._convert_to_opaque_object(sentinel)
+            assert type(op).__name__ == "OpaquePyObject"
+            assert op.pyobject() is sentinel
+            del op
+        gc.collect()
+
+    def test_concurrent_opaque_roundtrip(self) -> None:
+        """Many threads round-tripping distinct payloads keep identity and don't leak.
+
+        Each thread echoes its own freshly-built payload through the FFI (so the
+        OpaquePyObject carrier is constructed and destroyed on every iteration,
+        racing its slot-wrapped dealloc across threads) and asserts the returned
+        object is the one it sent. The last payload per thread is tracked by a
+        weakref and must be reclaimed after the race — the concurrent teeth for the
+        carrier DecRef (see ``test_opaque_roundtrip_does_not_leak``). FT-scaled; the
+        GIL build runs a light smoke.
+        """
+        echo = tvm_ffi.convert(lambda x: x)
+        nthreads = 8
+        iters = 4000 if _is_free_threaded_python() else 400
+        barrier = threading.Barrier(nthreads)
+        errors: list[BaseException] = []
+        last_refs: list[weakref.ref[Any]] = []
+        last_refs_lock = threading.Lock()
+
+        class Payload:
+            __slots__ = ("__weakref__", "v")
+
+            def __init__(self, v: int) -> None:
+                self.v = v
+
+        def worker(tid: int) -> None:
+            try:
+                barrier.wait()
+                last = None
+                for i in range(iters):
+                    p = Payload(tid * 1_000_000 + i)
+                    r = echo(p)  # round-trips through the OpaquePyObject carrier
+                    assert r is p, "opaque round-trip must preserve identity"
+                    assert r.v == p.v
+                    last = weakref.ref(p)
+                    del r, p
+                if last is not None:
+                    with last_refs_lock:
+                        last_refs.append(last)
+            except BaseException as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(nthreads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, f"worker(s) raised: {errors!r}"
+        gc.collect()
+        leaked = sum(1 for wr in last_refs if wr() is not None)
+        assert leaked == 0, (
+            f"OpaquePyObject carrier leaked {leaked}/{len(last_refs)} payloads under "
+            f"concurrent churn (carrier dealloc DecRef did not run)"
+        )
+
 
 # ---------------------------------------------------------------------------
 # GC integration with Inactive
@@ -691,7 +930,6 @@ class TestStateCWithCyclicGC:
             gc.collect()  # cached allocation is inactive (untracked) between drops
         assert outer.x.val == 5
 
-    @requires_tying
     def test_gc_collect_with_holder_keeping_chandle(self) -> None:
         """gc.collect() around inactive memory keeps id() stable."""
         # The Inner chandle is held by ``outer``'s field for the lifetime
@@ -710,7 +948,6 @@ class TestStateCWithCyclicGC:
 # ---------------------------------------------------------------------------
 # Isolation: many distinct chandles each Inactive at once
 # ---------------------------------------------------------------------------
-@requires_tying
 class TestMultipleChandlesIsolation:
     """A revive on one chandle must not corrupt the cached binding on
     another. Each chandle's header is independent — verify by cycling
