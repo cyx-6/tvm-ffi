@@ -278,46 +278,56 @@ TVM_FFI_INLINE PyObject* TVMFFIPyTagClearInTransit(PyObject* tagged) {
   return reinterpret_cast<PyObject*>(reinterpret_cast<uintptr_t>(tagged) & ~kPyInTransitTagBit);
 }
 
-#ifdef Py_GIL_DISABLED
 //---------------------------------------------------------------
-// Free-threaded synchronization: a spin-lock encoded in ``tagged_pyobj``.
+// Word-access leaves: the ONE place the GIL / free-threaded divergence lives for the
+// whole binding state machine.
 //
-// The word is the single source of truth for a chandle's wrapper binding, and on
-// free-threaded builds it is mutated concurrently. We serialize transitions with a
-// per-word spin-lock (the Locked bit), CAS-acquired and store-released. Two rules
-// keep it deadlock-free against the cyclic GC's stop-the-world:
+// Every transition body below (make_ret, the dealloc family, Rebind) is written once
+// against this small vocabulary; the build difference is pushed entirely down here so
+// the logic reads identically on both builds:
+//   TVMFFIPyLockWord(h)        acquire the word, return the prior (untagged-of-lock)
+//                              state the caller now owns.
+//   TVMFFIPyUnlockWord(h, x)   release the word, PUBLISHING new state ``x``.
+//   TVMFFIPyUnlockKeep(h, cur) release the word with state UNCHANGED (republish ``cur``).
+//   TVMFFIPyAcquireLoad(h)     read the word WITHOUT acquiring (a lock-free peek).
+//   TVMFFIPyEnableTryIncRef(obj)
+//                              arm ``obj`` for a racing reader's TryIncRef before publish.
+//
+// Free-threaded build: the word is a spin-lock encoded in ``tagged_pyobj`` (the Locked
+// bit), CAS-acquired and store-released. Two rules keep it deadlock-free against the
+// cyclic GC's stop-the-world:
 //   1. The lock is held only across short, *park-free* sections -- pure word/header
 //      memory ops, never an allocation, DecRef, GC op, or blocking call. So a lock
-//      holder can never be frozen by GC mid-section, and spinners make bounded
-//      progress.
-//   2. Any wait (lock contention, or waiting out an InTransit transition) goes
-//      through ``TVMFFIPyLockYield``, which detaches the thread state -- the
-//      same cooperation PyMutex performs when it blocks -- so a concurrent
-//      stop-the-world GC counts the waiter as paused and is never starved.
-// Operations that must allocate/revive (which can reach a safepoint) do so with the
-// lock *released*, publishing the InTransit bit first so others yield until the
-// allocating thread re-locks and publishes the result.
+//      holder can never be frozen by GC mid-section, and spinners make bounded progress.
+//   2. Any wait (lock contention, or waiting out an InTransit transition) goes through
+//      ``TVMFFIPyLockYield``, which detaches the thread state -- the same cooperation
+//      PyMutex performs when it blocks -- so a concurrent stop-the-world GC counts the
+//      waiter as paused and is never starved.
+// Operations that must allocate/revive (which can reach a safepoint) do so with the lock
+// *released*, publishing the InTransit bit first so others yield until the allocating
+// thread re-locks and publishes the result.
+//
+// GIL build: there is no concurrency on the word; the GIL itself serializes every
+// transition. So the "lock" is a plain field load, "unlock-publish" a plain store,
+// "unlock-keep" a no-op (the state is already what it was), the lock-free peek a plain
+// load, and there is no TryIncRef synchronizer to arm. Each leaf collapses to the exact
+// field access the pre-merge GIL code performed, so the merged bodies emit unchanged.
 //---------------------------------------------------------------
 
+#ifdef Py_GIL_DISABLED
 TVM_FFI_INLINE bool TVMFFIPyTagIsLocked(PyObject* tagged) {
   return (reinterpret_cast<uintptr_t>(tagged) & kPyLockedTagBit) != 0;
 }
 
-/*! \brief GC-safe back-off used by every wait below. Detaches the thread state so a
- *         concurrent stop-the-world GC treats this thread as paused; the matching
- *         re-attach blocks until any in-flight GC completes. Callers must hold an
- *         attached thread state (all our call sites do) and must NOT hold the word
- *         spin-lock across this. */
+/*! \brief GC-safe back-off for any wait on the word. Must run with an attached thread state
+ *         and WITHOUT the word lock held. */
 TVM_FFI_INLINE void TVMFFIPyLockYield() {
   PyThreadState* tstate = PyEval_SaveThread();
   PyEval_RestoreThread(tstate);
 }
 
-/*! \brief Acquire the per-word spin-lock. Returns the pre-lock state value (with the
- *         Locked bit cleared) that the caller now owns exclusively; the caller
- *         inspects it and must release via ``TVMFFIPyUnlockWord``. The Inactive /
- *         InTransit bits of the prior state are preserved in the return value, so
- *         the caller can decide whether to proceed or yield. */
+/*! \brief Acquire the per-word spin-lock (CAS on the Locked bit). Returns the prior binding
+ *         (Locked bit cleared); release it via ``TVMFFIPyUnlockWord`` / ``TVMFFIPyUnlockKeep``. */
 TVM_FFI_INLINE PyObject* TVMFFIPyLockWord(PyCustomAllocHeader* h) {
   for (;;) {
     PyObject* cur = __atomic_load_n(&h->tagged_pyobj, __ATOMIC_RELAXED);
@@ -337,13 +347,114 @@ TVM_FFI_INLINE PyObject* TVMFFIPyLockWord(PyCustomAllocHeader* h) {
   }
 }
 
-/*! \brief Release the per-word spin-lock, publishing ``new_state`` (which must have
- *         the Locked bit clear). Release-store so prior writes are visible to the
- *         next acquirer. */
+/*! \brief Release the lock, transitioning the binding to ``new_state``. */
 TVM_FFI_INLINE void TVMFFIPyUnlockWord(PyCustomAllocHeader* h, PyObject* new_state) {
   __atomic_store_n(&h->tagged_pyobj, new_state, __ATOMIC_RELEASE);
 }
+
+/*! \brief Release the lock leaving the binding unchanged; a no-op on the GIL arm. */
+TVM_FFI_INLINE void TVMFFIPyUnlockKeep(PyCustomAllocHeader* h, PyObject* cur) {
+  TVMFFIPyUnlockWord(h, cur);
+}
+
+/*! \brief Read the binding without acquiring the lock (a lock-free peek). */
+TVM_FFI_INLINE PyObject* TVMFFIPyAcquireLoad(PyCustomAllocHeader* h) {
+  return __atomic_load_n(&h->tagged_pyobj, __ATOMIC_ACQUIRE);
+}
+
+/*! \brief Arm ``obj`` for a concurrent reader's ``TryIncRef``; sequence before publishing it
+ *         Active. No-op for NULL. */
+TVM_FFI_INLINE void TVMFFIPyEnableTryIncRef(PyObject* obj) {
+  if (obj != nullptr) PyUnstable_EnableTryIncRef(obj);
+}
+
+//---------------------------------------------------------------
+// make_ret leaves: the steps the merged ``TVMFFIPyMakeRetObject`` body is written against.
+// The wrapper allocation cannot run under the word lock (``tp_new`` can reach a GC
+// safepoint), so the binding is classified under the lock, then moved to an InTransit claim
+// with the lock released across the alloc, then to Active. The classify and the InTransit
+// unlock stay split (the classify's FT yield-loop has no GIL analog; the InTransit unlock is a
+// GIL no-op -- no peers to make yield); the un-claim (publish Active / restore on failure) is
+// build-agnostic and inlined in make_ret, the GIL build reducing it to a single word write.
+//---------------------------------------------------------------
+
+/*! \brief Settle the binding and acquire the right to transition it. Returns with the lock
+ *         HELD in both outcomes:
+ *           (true,  cur)        Active   -- ``cur`` is the live wrapper, already inc-ref'd.
+ *           (false, W|Inactive) Inactive -- ``cur`` is a revivable cached allocation.
+ *           (false, NULL)       Detached -- no wrapper bound.
+ *           (true,  NULL)       cannot occur.
+ *         Waits out any in-flight transition (a dealloc handshake or a peer make_ret's claim,
+ *         both marked InTransit) before settling. */
+TVM_FFI_INLINE bool TVMFFIPyLockClassifyActive(PyCustomAllocHeader* h, PyObject** out) {
+  for (;;) {
+    PyObject* cur = TVMFFIPyLockWord(h);
+    if (TVMFFIPyTagInTransit(cur)) {  // (1) a dealloc or peer make_ret is mid-transition
+      TVMFFIPyUnlockKeep(h, cur);
+      TVMFFIPyLockYield();
+      continue;
+    }
+    if (cur != nullptr && !TVMFFIPyTagIsInactive(cur)) {  // (2) Active candidate
+      if (PyUnstable_TryIncRef(cur)) {
+        *out = cur;
+        return true;  // Active hit -- lock HELD, cur inc-ref'd
+      }
+      TVMFFIPyUnlockKeep(h, cur);  // dying: let its dealloc settle the word, then retry
+      TVMFFIPyLockYield();
+      continue;
+    }
+    *out = cur;    // (3) Inactive(W) clean, or (4) Detached(NULL)
+    return false;  // lock HELD
+  }
+}
+
+/*! \brief Release the lock, publishing the InTransit claim (``cur`` + InTransit) so peers yield
+ *         while the allocation runs lock-free. ``cur`` is the classify result: Inactive(W) ->
+ *         revive claim, Detached(NULL) -> fresh claim. The matching un-claim is the inline
+ *         ``LockWord; UnlockWord`` in make_ret (publish Active, or restore on alloc failure).
+ *         Split (not shared) because the GIL arm makes it a no-op: with no concurrency the claim
+ *         has no reader, so its two word stores (mark InTransit, later clear it) are skipped. */
+TVM_FFI_INLINE void TVMFFIPyUnlockInTransit(PyCustomAllocHeader* h, PyObject* cur) {
+  uintptr_t claim =
+      (cur != nullptr)
+          ? (reinterpret_cast<uintptr_t>(cur) | kPyInTransitTagBit)  // W|Inactive|InTransit
+          : kPyInTransitTagBit;                                      // bare InTransit
+  TVMFFIPyUnlockWord(h, reinterpret_cast<PyObject*>(claim));
+}
+
+#else
+// GIL build: the word is a plain field; the GIL is the lock. Each leaf is the exact
+// field access the pre-merge code performed (or a no-op where it did nothing).
+TVM_FFI_INLINE PyObject* TVMFFIPyLockWord(PyCustomAllocHeader* h) { return h->tagged_pyobj; }
+TVM_FFI_INLINE void TVMFFIPyUnlockWord(PyCustomAllocHeader* h, PyObject* new_state) {
+  h->tagged_pyobj = new_state;
+}
+TVM_FFI_INLINE void TVMFFIPyUnlockKeep(PyCustomAllocHeader*, PyObject*) {}  // unchanged: no store
+TVM_FFI_INLINE PyObject* TVMFFIPyAcquireLoad(PyCustomAllocHeader* h) { return h->tagged_pyobj; }
+TVM_FFI_INLINE void TVMFFIPyEnableTryIncRef(PyObject*) {}  // no TryIncRef synchronizer on the GIL
+
+// make_ret classify (GIL): a plain field read + Py_INCREF on an Active hit. The FT
+// InTransit-yield loop has no GIL analog (single-threaded; a reentrant claimer cannot yield
+// to a holder up its own stack), so this leaf stays split.
+TVM_FFI_INLINE bool TVMFFIPyLockClassifyActive(PyCustomAllocHeader* h, PyObject** out) {
+  PyObject* cur = h->tagged_pyobj;
+  if (cur != nullptr && !TVMFFIPyTagIsInactive(cur)) {  // Active: live canonical wrapper
+    Py_INCREF(cur);
+    *out = cur;
+    return true;
+  }
+  *out = cur;  // Inactive(W) or Detached(NULL)
+  return false;
+}
+// No claim under the GIL (no peers to make yield); the word stays at ``cur`` across the alloc.
+TVM_FFI_INLINE void TVMFFIPyUnlockInTransit(PyCustomAllocHeader*, PyObject*) {}
 #endif  // Py_GIL_DISABLED
+
+// Reverting the claim (alloc failed) and publishing Active are build-agnostic and used once
+// each, so they are written inline at their make_ret call sites as ``LockWord(h);
+// UnlockWord(h, x)`` -- re-acquire the lock released across the alloc, then publish ``x``. On
+// the GIL build ``LockWord`` is a plain load (elided) and ``UnlockWord`` a plain store, so each
+// reduces to the single word write the transition needs.
 
 /*!
  * \brief Per-thread vehicle carrying the inactive cached allocation address from
@@ -412,41 +523,6 @@ TVM_FFI_INLINE bool TVMFFIPyIsCanonical(void* chandle) {
 }
 
 //---------------------------------------------------------------
-// State-machine helpers.
-//---------------------------------------------------------------
-
-extern "C" {
-
-/*!
- * \brief Query the wrapper bound to ``chandle``. ``*out`` receives the
- *        *usable* (untagged) wrapper pointer; the return value says whether
- *        that wrapper is the live Active one.
- *
- * The (return, ``*out``) pair has four combinations; one cannot occur:
- *   (true,  non-NULL) : Active   -- the live canonical wrapper.
- *   (false, NULL)     : Detached / non-Python -- no wrapper bound.
- *   (false, non-NULL) : Inactive -- revivable cached allocation.
- *   (true,  NULL)     : impossible -- a true (Active) return always has a
- *                       real wrapper, so ``*out`` is non-NULL on every hit.
- *
- * \param chandle The chandle to query.
- * \param out Receives the usable (untagged) wrapper pointer, or NULL.
- * \return Whether the returned PyObject state is Active (the live canonical
- *         wrapper). False for Detached, Inactive, or non-Python chandles.
- */
-TVM_FFI_INLINE bool TVMFFIPyTryGetAttachedPyObject(void* chandle, PyObject** out) {
-  if (!TVMFFIPyIsCanonical(chandle)) {
-    *out = nullptr;
-    return false;
-  }
-  PyObject* tagged = TVMFFIPyHeader(chandle)->tagged_pyobj;
-  *out = TVMFFIPyRemoveTag(tagged);
-  return tagged != nullptr && !TVMFFIPyTagIsInactive(tagged);
-}
-
-}  // extern "C"
-
-//---------------------------------------------------------------
 // Forward declarations shared by SECTION A (make_ret) and the lifecycle sections.
 //---------------------------------------------------------------
 
@@ -455,21 +531,15 @@ __PYX_EXTERN_C void** TVMFFICyObjectGetCHandlePtr(PyObject* ptr);
 
 inline void TVMFFIPyTpFree(void* self);
 
-#ifdef Py_GIL_DISABLED
-// The free-threaded custom ``tp_dealloc`` slot, defined with the dealloc family below.
-extern "C" inline void TVMFFIPyTpDeallocSlot(PyObject* self);
-#endif
-
 //---------------------------------------------------------------
 // SECTION A -- alloc / revival / make_ret (HOT: per construction / per FFI return).
 //
 // The block birth (TVMFFIPyAllocate) and the whole Detached/Active/Inactive -> Active
 // return transition (TVMFFIPyMakeRetObject, behind Cython's make_ret_object) plus the
 // canonical-binding writer (TVMFFIPyRebindPyObject, used by move/construct/detach) and
-// the wrapper allocator slot (TVMFFIPyTpAlloc) live here. Shared, build-agnostic members
-// (Allocate, IsInactiveEligible, TpAlloc) sit above the one #ifdef/#else split; the FT
-// arm carries the lock-synchronized writers (NewWrapper, Rebind, make_ret), the GIL arm
-// the GIL-serialized ones (AttachPyObject, Rebind, make_ret).
+// the wrapper allocator slot (TVMFFIPyTpAlloc) live here. All members are build-agnostic,
+// written once against the word-access + make_ret leaves (which carry the GIL / free-threaded
+// divergence) -- there is no #ifdef/#else split in this section.
 //---------------------------------------------------------------
 
 /*!
@@ -493,28 +563,15 @@ inline void* TVMFFIPyAllocate(size_t size, size_t alignment, int32_t /*type_inde
   return static_cast<char*>(base_alloc) + sizeof(PyCustomAllocHeader);
 }
 
-/*!
- * \brief Wrap a returned ``chandle`` into its canonical Python wrapper -- the
- *        whole Detached / Active / Inactive transition in one frame, behind
- *        Cython's ``make_ret_object``.
- *
- * The caller owns +1 (strong) on ``chandle``; ownership transfers to the
- * returned wrapper. Returns a new owned reference, or NULL with a Python error
- * set (the Cython side declares this ``object``, so NULL propagates as an
- * exception).
- *
- * \param chandle The returned object handle (caller owns +1 strong).
- * \param cls_type The wrapper class to instantiate (a ``PyTypeObject*``).
- * \return New owned wrapper reference, or NULL with a Python error set.
- */
-#ifdef Py_GIL_DISABLED
-/*! \brief Allocate (fresh) or revive (in place, at ``revive``'s address) a wrapper
- *         of type ``tp`` via ``tp_new``. Returns a new reference (refcount 1) or
- *         NULL with a Python error set. Used only by the free-threaded
- *         ``TVMFFIPyMakeRetObject`` (the GIL path keeps the original inline form). */
+/*! \brief Allocate (fresh) or revive (in place, at ``revive``'s address) a wrapper of
+ *         type ``tp`` via ``tp_new``. Returns a new reference (refcount 1) or NULL with
+ *         a Python error set. Build-agnostic: touches no word state, only the per-thread
+ *         revive slot + ``tp_new``; shared by both builds' ``TVMFFIPyMakeRetObject``. */
 inline PyObject* TVMFFIPyNewWrapper(PyTypeObject* tp, PyObject* revive) {
   if (revive != nullptr) TVMFFIPySetReviveBlock(revive);
   PyObject* args = PyTuple_New(0);
+  // Near-dead (() is an immortal singleton) but required: tp_new does PyTuple_GET_SIZE(args)
+  // unchecked, so a NULL here would segfault rather than report.
   if (args == nullptr) {
     TVMFFIPySetReviveBlock(nullptr);  // disarm: tp_new will not run
     return nullptr;
@@ -531,37 +588,53 @@ inline PyObject* TVMFFIPyNewWrapper(PyTypeObject* tp, PyObject* revive) {
  *        word untouched. ``neo == NULL`` clears the binding (Active -> Detached).
  *
  * One compare-and-rebind critical section covers every (re)binding the tie needs:
- *   - move:    ``Rebind(chandle, other, self)`` -- transfer canonical status other->self.
- *   - construct:``Rebind(chandle, NULL, self)`` -- attach self iff Detached.
- *   - detach:  ``Rebind(chandle, obj,  NULL)`` -- clear iff we are the Active binding.
+ *   - move:     ``Rebind(chandle, other, self)`` -- transfer canonical status other->self.
+ *   - construct:``Rebind(chandle, NULL, self)``  -- attach self iff Detached.
+ *   - detach:   ``Rebind(chandle, obj,  NULL)``  -- clear iff we are the Active binding.
  * No-op for non-canonical chandles, or when the word is otherwise bound/busy (``neo``
  * simply does not become canonical -- an identity-only outcome, never a safety issue).
- * (FT arm: arm TryIncRef before publishing Active under the word lock.)
  */
 extern "C" TVM_FFI_INLINE void TVMFFIPyRebindPyObject(void* chandle, PyObject* expect,
                                                       PyObject* neo) {
   if (!TVMFFIPyIsCanonical(chandle)) return;
   PyCustomAllocHeader* h = TVMFFIPyHeader(chandle);
-  // Arm TryIncRef before publishing Active, so a racing Active-hit make_ret can safely
-  // TryIncRef ``neo``. Skip for a clearing rebind (neo == NULL) -- there is no wrapper
-  // to arm and the publish is just Detached.
-  if (neo != nullptr) PyUnstable_EnableTryIncRef(neo);
+  // Arm before publishing Active, so a racing Active-hit make_ret can safely TryIncRef
+  // ``neo`` (no-op for neo == NULL and on the GIL build).
+  TVMFFIPyEnableTryIncRef(neo);
   PyObject* cur = TVMFFIPyLockWord(h);
-  TVMFFIPyUnlockWord(h, (cur == expect || cur == nullptr) ? neo : cur);
+  if (cur == expect || cur == nullptr) {
+    TVMFFIPyUnlockWord(h, neo);  // publish neo (Active, or Detached when neo == NULL)
+  } else {
+    TVMFFIPyUnlockKeep(h, cur);  // not ours / busy: release unchanged (GIL: no store)
+  }
 }
 
-// make_ret (free-threaded): a lock-loop over the four word states -- InTransit busy =>
-// yield through a GC safepoint; Active => TryIncRef (authoritative, see below);
-// Inactive => revive in place at the same address; Detached => fresh wrapper. Active is
-// always published under the word spin-lock; alloc/revive run with the lock RELEASED,
-// publishing the InTransit bit so peers yield instead of racing the allocation.
+/*!
+ * \brief Wrap a returned ``chandle`` into its canonical Python wrapper -- the
+ *        whole Detached / Active / Inactive transition in one frame, behind
+ *        Cython's ``make_ret_object``.
+ *
+ * The caller owns +1 (strong) on ``chandle``; ownership transfers to the
+ * returned wrapper. Returns a new owned reference, or NULL with a Python error
+ * set (the Cython side declares this ``object``, so NULL propagates as an
+ * exception).
+ *
+ * \param chandle The returned object handle (caller owns +1 strong).
+ * \param cls_type The wrapper class to instantiate (a ``PyTypeObject*``).
+ * \return New owned wrapper reference, or NULL with a Python error set.
+ */
+// make_ret: one shared body over the four word states, written against the make_ret leaves.
+//   Non-canonical  -> fresh wrapper, no tie (FT cannot even locate a header here).
+//   Active         -> return the live canonical wrapper (classify inc-ref'd it).
+//   Inactive(W)    -> revive W in place at the same address (stable id()).
+//   Detached(NULL) -> fresh wrapper, bound canonical.
 extern "C" inline PyObject* TVMFFIPyMakeRetObject(void* chandle, PyObject* cls_type) {
   PyTypeObject* tp = reinterpret_cast<PyTypeObject*>(cls_type);
-  // Non-canonical chandle (no Python alloc header, e.g. a C++-static registry
-  // object): never tied -- wrap fresh, transferring the caller's +1.
+  // Non-canonical chandle (no Python alloc header, e.g. a C++-static registry object):
+  // never tied -- wrap fresh, transferring the caller's +1.
   if (!TVMFFIPyIsCanonical(chandle)) {
     PyObject* obj = TVMFFIPyNewWrapper(tp, nullptr);
-    if (obj == nullptr) {
+    if (obj == nullptr) {  // live OOM/tp_new failure: release the caller's +1 before propagating
       TVMFFIObjectDecRef(chandle);
       return nullptr;
     }
@@ -569,148 +642,31 @@ extern "C" inline PyObject* TVMFFIPyMakeRetObject(void* chandle, PyObject* cls_t
     return obj;
   }
   PyCustomAllocHeader* h = TVMFFIPyHeader(chandle);
-  for (;;) {
-    PyObject* cur = TVMFFIPyLockWord(h);
-    // (1) A transition is in flight on this chandle -- either a dealloc handshake
-    // settling, or another make_ret allocating / reviving; both publish InTransit.
-    // Dealloc has priority: yield through a GC safepoint and retry.
-    if (TVMFFIPyTagInTransit(cur)) {
-      TVMFFIPyUnlockWord(h, cur);
-      TVMFFIPyLockYield();
-      continue;
-    }
-    // (2) Active hit: ``cur`` is the live canonical wrapper (no tag bits). TryIncRef
-    // is the synchronizer -- and it is *authoritative* here because our custom
-    // ``tp_dealloc`` (TVMFFIPyTpDeallocSlot) clears the Active binding BEFORE Cython's
-    // resurrection bump runs. So a word still showing Active(cur) means cur's bump has
-    // not happened: cur's refcount is truthful (>=1 => alive; ==0 => shared in
-    // {0, MERGED}, both of which make TryIncRef fail). The doomed shared=MERGED-with-
-    // count footprint never coexists with an Active(cur) word.
-    if (cur != nullptr && !TVMFFIPyTagIsInactive(cur)) {
-      if (PyUnstable_TryIncRef(cur)) {
-        TVMFFIPyUnlockWord(h, cur);   // republish Active(cur) unchanged
-        TVMFFIObjectDecRef(chandle);  // drop caller's redundant +1 (OUTSIDE the lock)
-        return cur;
-      }
-      // ``cur`` reached refcount 0; its tp_dealloc is queued (blocked on our lock).
-      // Release so dealloc can settle the word to Inactive, then retry to revive.
-      TVMFFIPyUnlockWord(h, cur);
-      TVMFFIPyLockYield();
-      continue;
-    }
-    // (3) Inactive(W) clean: revive W in place at the same address (stable id()).
-    if (cur != nullptr) {  // TagIsInactive(cur); InTransit already excluded
-      PyObject* w = TVMFFIPyRemoveTag(cur);
-      // Publish Inactive|InTransit (the claim) so others yield while we revive -- the
-      // alloc must run with the lock RELEASED, as it can reach a GC safepoint. This is
-      // the same word shape the dealloc handshake uses; it is unambiguous because a
-      // tp_free/delete_space on ``w`` cannot run during the claim (we are its sole
-      // referrer, reviving 0->1, and make_ret's strong chandle ref pins weak > 0).
-      TVMFFIPyUnlockWord(
-          h, reinterpret_cast<PyObject*>(reinterpret_cast<uintptr_t>(w) | kPyCachedInactiveTagBit |
-                                         kPyInTransitTagBit));
-      PyObject* obj = TVMFFIPyNewWrapper(tp, w);  // revives w in place
-      if (obj == nullptr) {
-        TVMFFIPyLockWord(h);  // restore Inactive(W), drop caller's +1
-        TVMFFIPyUnlockWord(h, reinterpret_cast<PyObject*>(reinterpret_cast<uintptr_t>(w) |
-                                                          kPyCachedInactiveTagBit));
-        TVMFFIObjectDecRef(chandle);
-        return nullptr;
-      }
-      *TVMFFICyObjectGetCHandlePtr(obj) = chandle;  // caller's +1 transfers to obj
-      PyUnstable_EnableTryIncRef(obj);              // arm BEFORE publishing Active
-      TVMFFIPyLockWord(h);
-      TVMFFIPyUnlockWord(h, obj);  // publish Active(obj)
-      return obj;
-    }
-    // (4) Detached (cur == NULL): fresh wrapper. Publish bare InTransit (the claim:
-    // no wrapper pointer yet, so Inactive stays clear) so concurrent fresh-allocs on
-    // this chandle dedup (they yield at (1), then Active-hit our wrapper). This is the
-    // one word shape with InTransit set but Inactive clear; it is read only by (1)
-    // (which tests InTransit alone) and cleared by the direct Active(obj) publish
-    // below, never via TVMFFIPyTagClearInTransit.
-    TVMFFIPyUnlockWord(h, reinterpret_cast<PyObject*>(kPyInTransitTagBit));
-    PyObject* obj = TVMFFIPyNewWrapper(tp, nullptr);
-    if (obj == nullptr) {
-      TVMFFIPyLockWord(h);
-      TVMFFIPyUnlockWord(h, nullptr);  // restore Detached
-      TVMFFIObjectDecRef(chandle);
-      return nullptr;
-    }
-    *TVMFFICyObjectGetCHandlePtr(obj) = chandle;  // caller's +1 transfers to obj
-    PyUnstable_EnableTryIncRef(obj);
+  PyObject* cur;
+  // Active hit: return the live canonical wrapper (classify inc-ref'd it); drop caller's +1.
+  if (TVMFFIPyLockClassifyActive(h, &cur)) {
+    TVMFFIPyUnlockKeep(h, cur);
+    TVMFFIObjectDecRef(chandle);
+    return cur;
+  }
+  // Inactive(W) -> revive, Detached(NULL) -> fresh. The InTransit claim opens here and is
+  // cleared on every exit below: the word carries the InTransit bit (FT only) across the
+  // lock-free allocation so peers yield, and exactly one of the two un-claim sites removes it.
+  PyObject* w = TVMFFIPyRemoveTag(cur);
+  TVMFFIPyUnlockInTransit(h, cur);  // === claim: mark InTransit, drop the lock for the alloc ===
+  PyObject* obj = TVMFFIPyNewWrapper(tp, w);
+  if (obj == nullptr) {  // live OOM/tp_new failure: undo the claim before propagating
     TVMFFIPyLockWord(h);
-    TVMFFIPyUnlockWord(h, obj);  // publish Active(obj)
-    return obj;
-  }
-}
-#else
-/*!
- * \brief Bind ``obj`` to ``chandle`` as the canonical active PyObject (GIL build only).
- *        No-op for chandles without a Python alloc header. Used by the GIL ``make_ret``
- *        fresh path: it locks-and-publishes Active with no window for an allocation in
- *        between. (Deliberately absent on FT, where a fresh wrapper must be published
- *        through the InTransit-claim protocol or ``TVMFFIPyRebindPyObject``; a plain
- *        store would be a mis-synchronized publish, so any FT caller is a deliberate
- *        compile error.)
- */
-TVM_FFI_INLINE void TVMFFIPyAttachPyObject(void* chandle, PyObject* obj) {
-  if (!TVMFFIPyIsCanonical(chandle)) return;
-  TVMFFIPyHeader(chandle)->tagged_pyobj = obj;
-}
-
-/*!
- * \brief Atomically rebind ``chandle``'s canonical PyObject to ``neo`` iff the current
- *        binding is exactly ``expect`` (Active(expect)) or Detached; otherwise leave the
- *        word untouched. ``neo == NULL`` clears the binding (Active -> Detached).
- *
- * One compare-and-rebind covers every (re)binding the tie needs (move / construct /
- * detach). On the GIL build the single-statement body is the whole critical section.
- */
-extern "C" TVM_FFI_INLINE void TVMFFIPyRebindPyObject(void* chandle, PyObject* expect,
-                                                      PyObject* neo) {
-  if (!TVMFFIPyIsCanonical(chandle)) return;
-  PyCustomAllocHeader* h = TVMFFIPyHeader(chandle);
-  PyObject* cur = h->tagged_pyobj;
-  if (cur == expect || cur == nullptr) {
-    h->tagged_pyobj = neo;
-  }
-}
-
-// make_ret (GIL): straight-line, GIL-serialized. Active hit => Py_INCREF the cached
-// wrapper; Inactive => arm the revive block so tp_alloc reuses the cached allocation;
-// Detached => fresh wrapper. No lock, no retry -- the GIL is the synchronizer.
-extern "C" inline PyObject* TVMFFIPyMakeRetObject(void* chandle, PyObject* cls_type) {
-  PyObject* attached;
-  if (TVMFFIPyTryGetAttachedPyObject(chandle, &attached)) {
-    // Active hit: return the cached wrapper; drop the caller's redundant +1.
-    Py_INCREF(attached);
-    TVMFFIObjectDecRef(chandle);
-    return attached;
-  }
-  if (attached != nullptr) {
-    // Inactive: revive the cached allocation in place (stable id()).
-    TVMFFIPySetReviveBlock(attached);
-  }
-  PyObject* args = PyTuple_New(0);
-  if (args == nullptr) {
-    TVMFFIPySetReviveBlock(nullptr);  // disarm: tp_new will not run
+    TVMFFIPyUnlockWord(h, cur);  // un-claim: remove InTransit, restore Inactive(W) / Detached
     TVMFFIObjectDecRef(chandle);
     return nullptr;
   }
-  PyTypeObject* tp = reinterpret_cast<PyTypeObject*>(cls_type);
-  PyObject* obj = tp->tp_new(tp, args, nullptr);
-  Py_DECREF(args);
-  TVMFFIPySetReviveBlock(nullptr);  // defensive: clear if tp_new bypassed tp_alloc
-  if (obj == nullptr) {
-    TVMFFIObjectDecRef(chandle);
-    return nullptr;
-  }
-  *TVMFFICyObjectGetCHandlePtr(obj) = chandle;
-  TVMFFIPyAttachPyObject(chandle, obj);
+  *TVMFFICyObjectGetCHandlePtr(obj) = chandle;  // caller's +1 transfers to obj
+  TVMFFIPyEnableTryIncRef(obj);
+  TVMFFIPyLockWord(h);
+  TVMFFIPyUnlockWord(h, obj);  // un-claim: remove InTransit, publish Active(obj)
   return obj;
 }
-#endif
 
 //---------------------------------------------------------------
 // PyObject-tying: the wrapper lifecycle (custom tp_alloc / tp_dealloc / tp_free
@@ -801,60 +757,28 @@ inline PyObject* TVMFFIPyTpAlloc(PyTypeObject* type, Py_ssize_t nitems) {
 //
 // The cache-vs-free handshake across three slots: TVMFFIPyTpDealloc (the __dealloc__
 // hook) opens it, TVMFFIPyTpFree settles it, and TVMFFIPyDeleteSpace (the C++ weak
-// deleter) reclaims the block. On free-threaded builds the transition is hoisted
-// PRE-bump into TVMFFIPyTpDeallocSlot (the custom tp_dealloc), backed by the
-// NearestCdefBase walk + the original-thunk table; on the GIL build it runs from
-// __dealloc__ post-bump (safe under the GIL). One #ifdef/#else split: the FT arm
-// carries the lock-synchronized transition plus the slot machinery (no GIL twin);
-// the GIL arm carries the GIL-serialized transition.
+// deleter) reclaims the block. The handshake bodies (TVMFFIPyTpDeallocImpl, TpFree,
+// DeleteSpace) are now build-agnostic -- written once against the word-access leaves.
+// Two things stay #ifdef'd: (a) WHERE the binding transition runs -- on free-threaded
+// builds it is hoisted PRE-bump into a custom tp_dealloc slot, so the post-bump
+// __dealloc__ hook (TVMFFIPyTpDealloc) is a no-op; on the GIL build there is no slot and
+// the hook runs TVMFFIPyTpDeallocImpl directly (post-bump is safe under the GIL); and
+// (b) the free-threaded-only per-carrier slot definitions (one dedicated tp_dealloc slot
+// per cdef CObject-family type, each statically bound to its own original thunk) that back
+// that pre-bump dispatch and have no GIL twin.
 //---------------------------------------------------------------
 
-#ifdef Py_GIL_DISABLED
-// ===================== free-threaded arm =====================
-/*! \brief The nearest non-heap (cdef) ancestor of ``tp``: the type CPython's
- *         ``subtype_dealloc`` base-walks to for a heap subtype, or ``tp`` itself for a
- *         cdef class. This is the single point where the tying ``tp_dealloc`` slot is
- *         installed (``TVMFFIPyInstallTypeSlots``) and where the original thunk is
- *         recorded (``TVMFFIPyFindOriginalDealloc``), so both must locate it the same
- *         way. Returns nullptr only for a type with no non-heap ancestor (not a
- *         ``CObject`` family type -- never reaches the tying paths). */
-TVM_FFI_INLINE PyTypeObject* TVMFFIPyNearestCdefBase(PyTypeObject* tp) {
-  for (PyTypeObject* t = tp; t != nullptr; t = t->tp_base) {
-    if ((t->tp_flags & Py_TPFLAGS_HEAPTYPE) == 0) return t;
-  }
-  return nullptr;
-}
-
-/*!
- * \brief The dealloc binding transition: release the wrapper's +1 on chandle and
- *        open the cache-vs-free handshake for an eligible canonical wrapper.
- *
- *  Three paths:
- *   - Eligible canonical Active binding: Active -> Inactive | InTransit, keep the
- *     allocation cached, then DecRef (``tp_free`` settles the InTransit handshake).
- *   - Ineligible wrapper: detach the binding (Active -> Detached) BEFORE the DecRef,
- *     so a deleter firing inside it sees no stale Active back-pointer, then DecRef.
- *   - Non-canonical / not-our binding (cleared by an eager move, points at another
- *     wrapper or an inactive cached allocation, or a chandle with no Python alloc
- *     header): just null ``chandle`` and DecRef.
- *
- *  CALLED PRE-BUMP. On the GIL build this runs from ``__dealloc__``
- *  (``TVMFFIPyTpDealloc``). On the free-threaded build it MUST run before Cython's
- *  ``tp_dealloc`` resurrection bump (``Py_SET_REFCNT(o, +1)``): for a merge-path
- *  death that bump leaves the wrapper in a shared=MERGED state with a positive count,
- *  in which ``PyUnstable_TryIncRef`` *succeeds* even though Cython will unconditionally
- *  free the wrapper afterward. If the word still advertised Active(wrapper) during that
- *  window a concurrent ``make_ret`` Active-hit would revive a doomed reference (UAF).
- *  So on FT this is invoked from ``TVMFFIPyTpDeallocSlot`` (the custom ``tp_dealloc``),
- *  which clears the binding here and only then chains to Cython's thunk (= the bump).
- *  After that, Active(wrapper) in the word implies the bump has not run, so the
- *  wrapper's refcount is truthful and TryIncRef is authoritative.
- */
-// tp_dealloc binding transition (free-threaded): lock the word, and if we are exactly
-// the live Active binding (cur == wrapper) either cache it Inactive|InTransit (eligible)
-// or detach it (ineligible); otherwise leave the word and take the shared genuine-free
-// tail. The DecRef MUST run outside the lock -- it can fire the chandle deleter ->
-// TVMFFIPyDeleteSpace, which re-locks the same (non-reentrant) word.
+// The dealloc binding transition (shared): release the wrapper's +1 on chandle and open
+// the cache-vs-free handshake for an eligible canonical wrapper. Three transitions:
+//   - Eligible canonical Active binding: Active -> Inactive | InTransit, keep the cached
+//     allocation, then DecRef (``tp_free`` settles the InTransit handshake).
+//   - Ineligible wrapper: Active -> Detached BEFORE the DecRef, so a deleter firing inside
+//     it sees no stale Active back-pointer.
+//   - Non-canonical / not-our binding: leave the word, just null ``chandle`` and DecRef.
+// The DecRef MUST run outside the lock -- it can fire the chandle deleter (TVMFFIPyDeleteSpace),
+// which re-locks the same non-reentrant word. Called PRE-BUMP: on FT via a carrier's pool
+// tp_dealloc slot (see the slot pool below for why the ordering is mandatory), on the GIL build
+// from ``__dealloc__``.
 extern "C" TVM_FFI_INLINE void TVMFFIPyTpDeallocImpl(void** ptr_to_chandle, PyObject* wrapper) {
   void* chandle = *ptr_to_chandle;
   // Already released by an eager move (detached to NULL); nothing to do. NULL is
@@ -876,7 +800,7 @@ extern "C" TVM_FFI_INLINE void TVMFFIPyTpDeallocImpl(void** ptr_to_chandle, PyOb
       // deleter firing inside it sees no stale Active binding.
       TVMFFIPyUnlockWord(h, nullptr);
     } else {
-      TVMFFIPyUnlockWord(h, cur);  // not our binding -- leave it, take the tail
+      TVMFFIPyUnlockKeep(h, cur);  // not our binding -- release unchanged (GIL: no store)
     }
   }
   // Tail (not eligible / not ours / non-canonical): genuine free. Null wrapper.chandle
@@ -886,112 +810,14 @@ extern "C" TVM_FFI_INLINE void TVMFFIPyTpDeallocImpl(void** ptr_to_chandle, PyOb
   TVMFFIObjectDecRef(chandle);
 }
 
-// Free-threaded custom ``tp_dealloc`` (the pre-bump binding-clear hook).
-//
-// Cython's generated ``tp_dealloc`` bumps the wrapper's refcount
-// (``Py_SET_REFCNT(o, +1)``) before running ``__dealloc__`` and then frees it
-// unconditionally. For a merge-path death (a wrapper that crossed threads) that bump
-// produces a ``shared = _Py_REF_SHARED(1, MERGED)`` footprint on which
-// ``PyUnstable_TryIncRef`` SUCCEEDS -- so a concurrent ``make_ret`` Active-hit would
-// revive a wrapper Cython is about to free (borrowed-ref UAF). The fix is to perform
-// the Active->Inactive/Detached binding transition BEFORE that bump, in a custom
-// ``tp_dealloc`` slot that then chains to Cython's original thunk.
-//
-// Slot routing across the type hierarchy (verified empirically):
-//   * Non-heap cdef classes (CObject and its cdef subclasses Function/Tensor/Error/
-//     OpaquePyObject/CContainerBase) each carry a Cython dealloc thunk. We replace that
-//     slot with ``TVMFFIPyTpDeallocSlot`` and remember the original.
-//   * Heap subtypes (dataclasses, Array, Map, ...) keep CPython's ``subtype_dealloc``,
-//     which base-walks ``tp_base`` to the nearest non-``subtype_dealloc`` dealloc and
-//     calls it -- i.e. it lands on our slot installed on the nearest cdef ancestor. So
-//     we install the slot on that nearest non-heap ancestor (idempotently) and never on
-//     heap subtypes, which avoids re-entry while still intercepting every death pre-bump.
-//
-// The original thunk is found via ``TVMFFIPyNearestCdefBase(Py_TYPE(self))`` -- the same
-// type ``subtype_dealloc`` would have dispatched to, and where we recorded the original.
-//---------------------------------------------------------------
-
-// Append-only table mapping a wrapped cdef type to its original ``tp_dealloc``. Writes
-// happen only at type registration (``TVMFFIPyInstallTypeSlots``); reads happen in the
-// dealloc slot. Lock-free reads: an entry's fields are written before ``g_orig_count``
-// is release-stored, and readers acquire-load the count, so a visible slot always has a
-// fully-initialized original. Capacity is tiny (one per cdef CObject-family type).
-struct TVMFFIPyOrigDealloc {
-  PyTypeObject* tp;
-  destructor orig;
-};
-inline constexpr int kPyMaxWrappedTypes = 64;
-inline TVMFFIPyOrigDealloc g_orig_dealloc[kPyMaxWrappedTypes];
-inline std::atomic<int> g_orig_count{0};
-
-/*! \brief Find the recorded original ``tp_dealloc`` for ``tp``: look up its nearest cdef
- *         ancestor (where the slot was installed and the original recorded) in the table.
- *         Returns nullptr if none (should not happen for a type whose instances reach our
- *         slot -- that nearest ancestor is exactly what we wrapped). */
-inline destructor TVMFFIPyFindOriginalDealloc(PyTypeObject* tp) {
-  PyTypeObject* base = TVMFFIPyNearestCdefBase(tp);
-  int n = g_orig_count.load(std::memory_order_acquire);
-  for (int i = 0; i < n; ++i) {
-    if (g_orig_dealloc[i].tp == base) return g_orig_dealloc[i].orig;
-  }
-  return nullptr;
-}
-
-/*! \brief Custom ``tp_dealloc`` (FT only): clear the wrapper<->chandle binding pre-bump,
- *         then chain to the original Cython thunk (which performs the bump, ``__dealloc__``,
- *         and ``tp_free``). */
-extern "C" inline void TVMFFIPyTpDeallocSlot(PyObject* self) {
-  TVMFFIPyTpDeallocImpl(TVMFFICyObjectGetCHandlePtr(self), self);
-  destructor orig = TVMFFIPyFindOriginalDealloc(Py_TYPE(self));
-  // ``orig`` is always found for instances that reach this slot (their type or a cdef
-  // ancestor was wrapped). The guard is purely defensive.
-  if (orig != nullptr) {
-    orig(self);
-  }
-}
-
 /*!
- * \brief ``__dealloc__`` hook, called by Cython's ``tp_dealloc`` thunk AFTER its
- *        resurrection bump.
- *
- *        GIL build: no custom ``tp_dealloc`` slot is installed, so this is the only
- *        site that runs the binding transition. Post-bump is safe under the GIL.
- *
- *        Free-threaded build: a NO-OP. The transition already ran PRE-bump in
- *        ``TVMFFIPyTpDeallocSlot``, the custom ``tp_dealloc`` installed on every cdef
- *        carrier. Coverage is total because the ``CObject`` cdef family is a closed,
- *        compile-time set -- ``CObject``, ``CContainerBase``, ``OpaquePyObject``,
- *        ``Error``, ``Tensor``, ``Function`` -- each wrapped at registration
- *        (``TVMFFIPyInstallTypeSlots``) or, for the registration-bypassing carrier
- *        ``OpaquePyObject``, at init (``TVMFFIPyInstallTypeSlotsForOpaque``); every
- *        heap subtype routes through ``subtype_dealloc`` to its nearest cdef ancestor's
- *        slot. So no FT ``CObject`` death reaches here with the transition still owed,
- *        and re-running it post-bump would double-DecRef and clobber the InTransit
- *        locator ``tp_free`` needs. (The table that backs the slot holds at most that
- *        handful of types against a capacity of ``kPyMaxWrappedTypes`` = 64, so it
- *        never overflows into an unwrapped-carrier degrade.)
+ * \brief Custom ``tp_free``, the second step of the dealloc handshake. The InTransit bit
+ *        (read here) says whether the chandle's deleter fired during the
+ *        ``TVMFFIPyTpDealloc`` DecRef: still set => the chandle outlived us, settle to
+ *        Inactive and keep ``self`` cached; cleared => free the C++ block too. The
+ *        ``chandle == NULL`` / non-canonical path is a plain genuine free, dispatching on
+ *        GC-ness like CPython's default.
  */
-extern "C" TVM_FFI_INLINE void TVMFFIPyTpDealloc(void** ptr_to_chandle, PyObject* wrapper) {
-  (void)ptr_to_chandle;
-  (void)wrapper;
-}
-
-/*!
- * \brief Custom ``tp_free``, the second step of the dealloc handshake. The
- *        InTransit bit (read here) says whether the chandle's deleter fired
- *        during the ``TVMFFIPyTpDealloc`` DecRef: still set => keep the
- *        allocation cached Inactive; cleared => free the C++ block too. The
- *        ``chandle == NULL`` / non-canonical path is a plain genuine free,
- *        dispatching on GC-ness like CPython's default.
- */
-// tp_free (free-threaded): for a canonical chandle, lock the word and read InTransit --
-// set => the chandle outlived us, settle to Inactive and keep ``self`` cached; clear =>
-// the deleter deferred the block free to us, free it. ``*chandle_ptr = nullptr`` MUST be
-// written while still holding the lock, BEFORE UnlockWord publishes Inactive: otherwise a
-// make_ret revive could grab the Inactive word and re-set ``self``'s chandle, only for
-// this stale NULL store to clobber it (Active wrapper with chandle == NULL -> crash on
-// the next field access). The lock also serializes against TVMFFIPyDeleteSpace on the
-// same chandle.
 inline void TVMFFIPyTpFree(void* self) {
   void** chandle_ptr = TVMFFICyObjectGetCHandlePtr(static_cast<PyObject*>(self));
   void* chandle = *chandle_ptr;
@@ -999,15 +825,17 @@ inline void TVMFFIPyTpFree(void* self) {
     PyCustomAllocHeader* h = TVMFFIPyHeader(chandle);  // header read BEFORE any free below
     PyObject* cur = TVMFFIPyLockWord(h);
     if (TVMFFIPyTagInTransit(cur)) {
-      // Case 0: chandle outlived us -- settle to stable Inactive, keep ``self``
-      // cached as the Inactive allocation (do NOT free it here).
+      // Case 0: chandle outlived us -- settle to stable Inactive, keep ``self`` cached.
+      // ``*chandle_ptr = nullptr`` MUST precede the publish (still under the lock): else a
+      // make_ret revive could grab the Inactive word and re-set the chandle, only for this
+      // stale NULL to clobber it (Active wrapper with chandle == NULL -> crash).
       *chandle_ptr = nullptr;
       TVMFFIPyUnlockWord(h, TVMFFIPyTagClearInTransit(cur));
       return;
     }
     // Case 1: deleter fired and deferred the block free to us (its sole free).
     *chandle_ptr = nullptr;
-    TVMFFIPyUnlockWord(h, cur);
+    TVMFFIPyUnlockKeep(h, cur);
     ::tvm::ffi::details::AlignedFree(static_cast<char*>(chandle) - sizeof(PyCustomAllocHeader));
   }
   PyObject* op = static_cast<PyObject*>(self);
@@ -1019,29 +847,21 @@ inline void TVMFFIPyTpFree(void* self) {
 }
 
 /*!
- * \brief delete_space callback (installed by TVMFFIPyAllocate), invoked from the
- *        C++ Weak deleter when the chandle's block's weak count hits 0. On an
- *        Inactive binding it reads the InTransit bit: set => an in-flight
- *        ``tp_free`` will free the block, so defer (keep it readable); clear =>
- *        reclaim the cached wrapper and free the block here. Detached just frees
- *        the block. The InTransit read is GIL-ordered against ``tp_free``'s
- *        clear so a cross-thread last-ref never defers a freed block; during
- *        teardown the same-thread defer still holds and stray cases only leak.
+ * \brief delete_space callback (installed by TVMFFIPyAllocate), invoked from the C++ Weak
+ *        deleter when the chandle's block's weak count hits 0. Detached => free the block
+ *        (lock-free fast path, the common C++-only-object case). Inactive => read InTransit:
+ *        set => an in-flight ``tp_free`` will free the block, so defer; clear => reclaim the
+ *        cached wrapper and free the block here.
+ *
+ * At weak->0 there are no live refs, so the binding is only ever Detached or
+ * Inactive(|InTransit) -- never Active/Locked, and never a make_ret claim (a claim holds a
+ * strong chandle ref => weak > 0), so any InTransit seen is unambiguously the dealloc
+ * handshake's.
  */
-// delete_space (free-threaded): a LOCK-FREE fast path for the common Detached case --
-// every C++-only object (allocated through the process-wide custom allocator but never
-// surfaced to Python) dies here, so keep it off the word lock to avoid serializing
-// non-Python destruction or risking a lock-order inversion against a C++ lock held during
-// destruction. When the weak count hits zero there are no live refs, so the word can only
-// be Detached or Inactive(|InTransit) -- never Active/Locked, and never a make_ret claim
-// (a claim holds a strong chandle ref => weak > 0, so it cannot overlap this weak->0
-// callback). The InTransit it may see is therefore unambiguously the dealloc handshake's.
-// An Inactive binding reads InTransit under the lock: set => an in-flight tp_free will
-// free the block (defer); clear => reclaim the cached wrapper and free here.
 inline void TVMFFIPyDeleteSpace(void* ptr) {
   void* base_alloc = static_cast<char*>(ptr) - sizeof(PyCustomAllocHeader);
   auto* h = static_cast<PyCustomAllocHeader*>(base_alloc);
-  PyObject* cur0 = __atomic_load_n(&h->tagged_pyobj, __ATOMIC_ACQUIRE);
+  PyObject* cur0 = TVMFFIPyAcquireLoad(h);
   if (!TVMFFIPyTagIsInactive(cur0)) {  // Detached: lock-free free
     ::tvm::ffi::details::AlignedFree(base_alloc);
     return;
@@ -1066,87 +886,107 @@ inline void TVMFFIPyDeleteSpace(void* ptr) {
       PyGILState_Release(gstate);
     }
   } else if (TVMFFIPyTagInTransit(cur0)) {
-    // Teardown, same-thread in-flight: defer the block free (no thread state).
-    __atomic_store_n(&h->tagged_pyobj, TVMFFIPyTagClearInTransit(cur0), __ATOMIC_RELEASE);
+    // Teardown, same-thread in-flight: defer the block free. No lock is held here (Python is
+    // finalizing single-threaded, no thread state to lock under) -- this is the one word
+    // store in the file with no matching TVMFFIPyLockWord; the release-store is still correct.
+    TVMFFIPyUnlockWord(h, TVMFFIPyTagClearInTransit(cur0));
     return;
   }
   ::tvm::ffi::details::AlignedFree(base_alloc);
 }
 
-/*! \brief Record + replace the ``tp_dealloc`` of ``tp`` with the FT pre-bump slot,
- *         once. Idempotent: a type already carrying the slot, or one with no original
- *         to chain to, is left untouched. */
-inline void TVMFFIPyWrapDealloc(PyTypeObject* tp) {
+#ifdef Py_GIL_DISABLED
+// ============ free-threaded-only: per-carrier pre-bump tp_dealloc slots ============
+//
+// Cython's generated ``tp_dealloc`` bumps the wrapper's refcount (``Py_SET_REFCNT(o, +1)``)
+// before running ``__dealloc__`` and then frees it unconditionally. For a merge-path death
+// (a wrapper that crossed threads) that bump produces a ``shared = _Py_REF_SHARED(1, MERGED)``
+// footprint on which ``PyUnstable_TryIncRef`` SUCCEEDS -- so a concurrent ``make_ret``
+// Active-hit would revive a wrapper Cython is about to free (borrowed-ref UAF). The fix is to
+// run the Active->Inactive/Detached binding transition BEFORE that bump, from a custom
+// ``tp_dealloc`` slot that then chains to the type's original Cython thunk (which performs the
+// bump, ``__dealloc__``, and ``tp_free``).
+//
+// Each carrier gets its OWN named slot + named original-thunk global (a slot is a bare
+// ``void(*)(PyObject*)`` with no closure, so it cannot recover its original from ``self`` -- it
+// must name a fixed global; distinct named slots give that with zero dealloc-time lookup). A
+// single installer ``TVMFFIPyWrapDealloc(type, name)`` is exposed; the caller passes the carrier
+// tag explicitly and it dispatches to the matching named slot, so the per-carrier wiring lives
+// entirely C-side and the carrier set is single-sourced below.
+//
+// Routing across the hierarchy (verified against Cython's generated C):
+//   * Each cdef carrier's own ``tp_dealloc`` field is replaced with its named slot -- carriers do
+//     NOT consult a base's slot at runtime (a cdef subclass's thunk hard-calls its base thunk by
+//     compiled symbol; a sibling carrier's slot is a separately initialized field), so each is
+//     wrapped individually. A wrapped carrier's slot runs the transition exactly ONCE per death:
+//     the inner cdef->cdef chain bypasses the replaced inner slots, so only the outermost
+//     dispatched slot fires it.
+//   * Heap subtypes (dataclasses, Array, Map, Object, ...) keep CPython's ``subtype_dealloc``,
+//     which base-walks ``tp_base`` to the nearest non-heap ancestor's slot -- a wrapped carrier
+//     -- and calls it. So wrapping the carriers covers every (unbounded) heap subclass for free.
+//
+// NOTE: dispatch is by the caller-supplied tag. A call site whose tag is not in the list below
+// (typo, or a new carrier not added here) silently misses -> that carrier stays unwrapped, so its
+// FT deaths leak the chandle +1 and lose identity. The list and the call-site tags are the single
+// place to keep in sync.
+//---------------------------------------------------------------
+
+// The closed cdef ``CObject`` family: one X(name) per carrier, matched against the leaf of
+// ``tp_name``. Single-sources the named slots, their original-thunk globals, and the installer's
+// dispatch -- they cannot drift. Adding a carrier needs a recompile anyway (cdef types are
+// compile-time); add its leaf name here.
+#define TVM_FFI_PY_DEALLOC_CARRIERS(X) \
+  X(CObject)                           \
+  X(CContainerBase)                    \
+  X(OpaquePyObject)                    \
+  X(Error)                             \
+  X(Tensor)                            \
+  X(Function)
+
+// Everything a carrier NAME needs, in one place:
+//   - ``g_orig_dealloc_NAME`` : its saved original ``tp_dealloc`` (nullptr until wrapped).
+//   - ``TVMFFIPyTpDeallocSlot_NAME`` : its pre-bump slot -- run the transition, then a DIRECT
+//     chain to that global (no base-walk, no lookup).
+//   - ``TVMFFIPyWrapDeallocMatch_NAME`` : if ``tag`` names this carrier, capture its original and
+//     install its slot (idempotent), and return true; otherwise return false. The installer just
+//     tries each carrier's matcher in turn.
+#define TVM_FFI_PY_DEFINE_DEALLOC_CARRIER(NAME)                                                    \
+  inline destructor g_orig_dealloc_##NAME = nullptr;                                               \
+  extern "C" inline void TVMFFIPyTpDeallocSlot_##NAME(PyObject* s) {                               \
+    TVMFFIPyTpDeallocImpl(TVMFFICyObjectGetCHandlePtr(s), s);                                      \
+    if (g_orig_dealloc_##NAME != nullptr) g_orig_dealloc_##NAME(s);                                \
+  }                                                                                                \
+  inline bool TVMFFIPyWrapDeallocMatch_##NAME(PyTypeObject* tp, destructor cur, const char* tag) { \
+    if (std::strcmp(tag, #NAME) != 0) return false;                                                \
+    if (cur != &TVMFFIPyTpDeallocSlot_##NAME) { /* not already ours: capture + install */          \
+      g_orig_dealloc_##NAME = cur;                                                                 \
+      tp->tp_dealloc = &TVMFFIPyTpDeallocSlot_##NAME;                                              \
+    }                                                                                              \
+    return true;                                                                                   \
+  }
+TVM_FFI_PY_DEALLOC_CARRIERS(TVM_FFI_PY_DEFINE_DEALLOC_CARRIER)
+#undef TVM_FFI_PY_DEFINE_DEALLOC_CARRIER
+
+/*! \brief Install a pre-bump dealloc slot on cdef carrier ``type_obj``, dispatching on the
+ *         caller-supplied carrier tag ``name`` to the matching named slot and capturing its
+ *         original ``tp_dealloc``. ``name`` is the dispatch key (one of the carriers in
+ *         ``TVM_FFI_PY_DEALLOC_CARRIERS``), passed explicitly so this never parses ``tp_name``; an
+ *         unknown tag, or a type already carrying its slot, is left untouched (idempotent). Called
+ *         once per carrier at init, right after the class is defined (object.pxi / error.pxi /
+ *         tensor.pxi / function.pxi); the tag at the call site must match a carrier name. */
+extern "C" inline void TVMFFIPyWrapDealloc(PyObject* type_obj, const char* name) {
+  if (type_obj == nullptr || !PyType_Check(type_obj) || name == nullptr) return;
+  PyTypeObject* tp = reinterpret_cast<PyTypeObject*>(type_obj);
   destructor cur = tp->tp_dealloc;
-  if (cur == &TVMFFIPyTpDeallocSlot || cur == nullptr) return;  // already wrapped / none
-  // Append (tp, cur) before publishing the bumped count, so a concurrent reader that
-  // sees the new count sees a fully-initialized entry. Registration is the sole writer
-  // and is effectively serialized by the import path; a relaxed read of the count for
-  // the duplicate check is fine (we only ever append).
-  int n = g_orig_count.load(std::memory_order_relaxed);
-  for (int i = 0; i < n; ++i) {
-    if (g_orig_dealloc[i].tp == tp) return;  // already recorded
-  }
-  if (n >= kPyMaxWrappedTypes) return;  // table full: leave unwrapped (degrade safely)
-  g_orig_dealloc[n].tp = tp;
-  g_orig_dealloc[n].orig = cur;
-  g_orig_count.store(n + 1, std::memory_order_release);
-  tp->tp_dealloc = &TVMFFIPyTpDeallocSlot;
+  if (cur == nullptr) return;
+  // Try each carrier's matcher; the first whose tag matches installs and we are done.
+#define TVM_FFI_PY_TRY_DEALLOC(NAME) \
+  if (TVMFFIPyWrapDeallocMatch_##NAME(tp, cur, name)) return;
+  TVM_FFI_PY_DEALLOC_CARRIERS(TVM_FFI_PY_TRY_DEALLOC)
+#undef TVM_FFI_PY_TRY_DEALLOC
+  // Unknown tag: not a carrier (see NOTE above). Leave unwrapped.
 }
-#else
-// ========================= GIL arm =========================
-/*!
- * \brief The dealloc binding transition: release the wrapper's +1 on chandle and
- *        open the cache-vs-free handshake for an eligible canonical wrapper.
- *
- *  Three paths:
- *   - Eligible canonical Active binding: Active -> Inactive | InTransit, keep the
- *     allocation cached, then DecRef (``tp_free`` settles the InTransit handshake).
- *   - Ineligible wrapper: detach the binding (Active -> Detached) BEFORE the DecRef,
- *     so a deleter firing inside it sees no stale Active back-pointer, then DecRef.
- *   - Non-canonical / not-our binding (cleared by an eager move, points at another
- *     wrapper or an inactive cached allocation, or a chandle with no Python alloc
- *     header): just null ``chandle`` and DecRef.
- *
- *  CALLED PRE-BUMP. On the GIL build this runs from ``__dealloc__``
- *  (``TVMFFIPyTpDealloc``). On the free-threaded build it MUST run before Cython's
- *  ``tp_dealloc`` resurrection bump (``Py_SET_REFCNT(o, +1)``): for a merge-path
- *  death that bump leaves the wrapper in a shared=MERGED state with a positive count,
- *  in which ``PyUnstable_TryIncRef`` *succeeds* even though Cython will unconditionally
- *  free the wrapper afterward. If the word still advertised Active(wrapper) during that
- *  window a concurrent ``make_ret`` Active-hit would revive a doomed reference (UAF).
- *  So on FT this is invoked from ``TVMFFIPyTpDeallocSlot`` (the custom ``tp_dealloc``),
- *  which clears the binding here and only then chains to Cython's thunk (= the bump).
- *  After that, Active(wrapper) in the word implies the bump has not run, so the
- *  wrapper's refcount is truthful and TryIncRef is authoritative.
- */
-// tp_dealloc binding transition (GIL): same shape, GIL-serialized so the word is a plain
-// field. Past the canonical guard ``chandle`` is a real object, so the binding (if ours)
-// is the live Active wrapper -- a plain ``==`` is the canonical check.
-extern "C" TVM_FFI_INLINE void TVMFFIPyTpDeallocImpl(void** ptr_to_chandle, PyObject* wrapper) {
-  void* chandle = *ptr_to_chandle;
-  if (chandle == nullptr) return;
-  if (TVMFFIPyIsCanonical(chandle)) {
-    PyCustomAllocHeader* h = TVMFFIPyHeader(chandle);
-    if (h->tagged_pyobj == wrapper) {
-      if (TVMFFIPyIsInactiveEligible(wrapper)) {
-        // Active -> Inactive: tag Inactive | InTransit, then DecRef. ``chandle``
-        // keeps pointing at the C++ block as a header locator; ``tp_free`` reads
-        // the InTransit bit from there to settle the handshake.
-        h->tagged_pyobj = reinterpret_cast<PyObject*>(reinterpret_cast<uintptr_t>(wrapper) |
-                                                      kPyCachedInactiveTagBit | kPyInTransitTagBit);
-        TVMFFIObjectDecRef(chandle);
-        return;
-      }
-      // Active -> Detached: not eligible. Detach first so the chandle deleter
-      // (which may fire inside the DecRef below) sees no stale Active binding.
-      h->tagged_pyobj = nullptr;
-    }
-  }
-  // Tail (not eligible / not ours / non-canonical): genuine free.
-  *ptr_to_chandle = nullptr;
-  TVMFFIObjectDecRef(chandle);
-}
+#undef TVM_FFI_PY_DEALLOC_CARRIERS
 
 /*!
  * \brief ``__dealloc__`` hook, called by Cython's ``tp_dealloc`` thunk AFTER its
@@ -1155,147 +995,63 @@ extern "C" TVM_FFI_INLINE void TVMFFIPyTpDeallocImpl(void** ptr_to_chandle, PyOb
  *        GIL build: no custom ``tp_dealloc`` slot is installed, so this is the only
  *        site that runs the binding transition. Post-bump is safe under the GIL.
  *
- *        Free-threaded build: a NO-OP. The transition already ran PRE-bump in
- *        ``TVMFFIPyTpDeallocSlot``, the custom ``tp_dealloc`` installed on every cdef
- *        carrier. Coverage is total because the ``CObject`` cdef family is a closed,
- *        compile-time set -- ``CObject``, ``CContainerBase``, ``OpaquePyObject``,
- *        ``Error``, ``Tensor``, ``Function`` -- each wrapped at registration
- *        (``TVMFFIPyInstallTypeSlots``) or, for the registration-bypassing carrier
- *        ``OpaquePyObject``, at init (``TVMFFIPyInstallTypeSlotsForOpaque``); every
- *        heap subtype routes through ``subtype_dealloc`` to its nearest cdef ancestor's
- *        slot. So no FT ``CObject`` death reaches here with the transition still owed,
- *        and re-running it post-bump would double-DecRef and clobber the InTransit
- *        locator ``tp_free`` needs. (The table that backs the slot holds at most that
- *        handful of types against a capacity of ``kPyMaxWrappedTypes`` = 64, so it
- *        never overflows into an unwrapped-carrier degrade.)
+ *        Free-threaded build: a NO-OP. The transition already ran PRE-bump in the carrier's
+ *        named slot. Coverage is total because the ``CObject`` cdef family is a closed,
+ *        compile-time set -- ``CObject``, ``CContainerBase``, ``OpaquePyObject``, ``Error``,
+ *        ``Tensor``, ``Function`` -- each wrapped once at init via ``TVMFFIPyWrapDealloc``;
+ *        every heap subtype routes through ``subtype_dealloc`` to its nearest cdef carrier's
+ *        slot. So no FT ``CObject`` death reaches here with the transition still owed, and
+ *        re-running it post-bump would double-DecRef and clobber the InTransit locator
+ *        ``tp_free`` needs.
+ */
+extern "C" TVM_FFI_INLINE void TVMFFIPyTpDealloc(void** ptr_to_chandle, PyObject* wrapper) {
+  (void)ptr_to_chandle;
+  (void)wrapper;
+}
+#else
+// ============ GIL-only: the post-bump __dealloc__ hook runs the transition ============
+/*!
+ * \brief ``__dealloc__`` hook, called by Cython's ``tp_dealloc`` thunk AFTER its
+ *        resurrection bump.
+ *
+ *        GIL build: no custom ``tp_dealloc`` slot is installed, so this is the only
+ *        site that runs the binding transition (``TVMFFIPyTpDeallocImpl``). Post-bump is
+ *        safe under the GIL -- nothing runs between the bump and the free.
+ *
+ *        Free-threaded build: a NO-OP (defined in the FT arm above). The transition already
+ *        ran PRE-bump in the carrier's dedicated ``tp_dealloc`` slot, so re-running it here
+ *        would double-DecRef and clobber the InTransit locator ``tp_free`` needs.
  */
 extern "C" TVM_FFI_INLINE void TVMFFIPyTpDealloc(void** ptr_to_chandle, PyObject* wrapper) {
   TVMFFIPyTpDeallocImpl(ptr_to_chandle, wrapper);
 }
 
-/*!
- * \brief Custom ``tp_free``, the second step of the dealloc handshake. The
- *        InTransit bit (read here) says whether the chandle's deleter fired
- *        during the ``TVMFFIPyTpDealloc`` DecRef: still set => keep the
- *        allocation cached Inactive; cleared => free the C++ block too. The
- *        ``chandle == NULL`` / non-canonical path is a plain genuine free,
- *        dispatching on GC-ness like CPython's default.
- */
-// tp_free (GIL): same handshake, GIL-serialized so the word is a plain field.
-inline void TVMFFIPyTpFree(void* self) {
-  void** chandle_ptr = TVMFFICyObjectGetCHandlePtr(static_cast<PyObject*>(self));
-  void* chandle = *chandle_ptr;
-  if (chandle != nullptr && TVMFFIPyIsCanonical(chandle)) {
-    PyCustomAllocHeader* h = TVMFFIPyHeader(chandle);  // header read BEFORE any free below
-    if (TVMFFIPyTagInTransit(h->tagged_pyobj)) {
-      // Case 0: chandle outlived us -- settle to stable Inactive, keep cached.
-      h->tagged_pyobj = TVMFFIPyTagClearInTransit(h->tagged_pyobj);
-      *chandle_ptr = nullptr;
-      return;
-    }
-    // Case 1: deleter fired and deferred the block free to us (its sole free).
-    *chandle_ptr = nullptr;
-    ::tvm::ffi::details::AlignedFree(static_cast<char*>(chandle) - sizeof(PyCustomAllocHeader));
-  }
-  PyObject* op = static_cast<PyObject*>(self);
-  if (PyObject_IS_GC(op)) {
-    PyObject_GC_Del(op);
-  } else {
-    PyObject_Free(op);
-  }
-}
-
-/*!
- * \brief delete_space callback (installed by TVMFFIPyAllocate), invoked from the
- *        C++ Weak deleter when the chandle's block's weak count hits 0. On an
- *        Inactive binding it reads the InTransit bit: set => an in-flight
- *        ``tp_free`` will free the block, so defer (keep it readable); clear =>
- *        reclaim the cached wrapper and free the block here. Detached just frees
- *        the block. The InTransit read is GIL-ordered against ``tp_free``'s
- *        clear so a cross-thread last-ref never defers a freed block; during
- *        teardown the same-thread defer still holds and stray cases only leak.
- */
-// delete_space (GIL): same handshake, GIL-serialized. The InTransit read is GIL-ordered
-// against tp_free's clear, so a last-ref never defers a freed block; during teardown the
-// same-thread defer still holds and stray cases only leak.
-inline void TVMFFIPyDeleteSpace(void* ptr) {
-  void* base_alloc = static_cast<char*>(ptr) - sizeof(PyCustomAllocHeader);
-  auto* h = static_cast<PyCustomAllocHeader*>(base_alloc);
-  if (TVMFFIPyTagIsInactive(h->tagged_pyobj)) {
-    if (TVMFFIPyIsPythonAlive()) {
-      PyGILState_STATE gstate = PyGILState_Ensure();
-      if (TVMFFIPyIsPythonAlive()) {
-        if (TVMFFIPyTagInTransit(h->tagged_pyobj)) {
-          // In-flight: defer both frees to tp_free; keep the block.
-          h->tagged_pyobj = TVMFFIPyTagClearInTransit(h->tagged_pyobj);
-          PyGILState_Release(gstate);
-          return;
-        }
-        // Settled: reclaim the cached wrapper, then free the block below.
-        PyObject_GC_Del(TVMFFIPyRemoveTag(h->tagged_pyobj));
-      }
-      PyGILState_Release(gstate);
-    } else if (TVMFFIPyTagInTransit(h->tagged_pyobj)) {
-      // Teardown, same-thread in-flight: defer the block free (no GIL needed).
-      h->tagged_pyobj = TVMFFIPyTagClearInTransit(h->tagged_pyobj);
-      return;
-    }
-  }
-  ::tvm::ffi::details::AlignedFree(base_alloc);
-}
+// No pre-bump slot under the GIL (the bump UAF cannot occur): the installer is a no-op stub so
+// the Cython extern (declared unconditionally in base.pxi) still links.
+extern "C" TVM_FFI_INLINE void TVMFFIPyWrapDealloc(PyObject*, const char*) {}
 #endif  // Py_GIL_DISABLED
 
 //---------------------------------------------------------------
 // SECTION C -- installation (COLD: once per registered type / once per process).
 //
-// ``TVMFFIPyInstallTypeSlots`` patches a registered type's ``tp_alloc`` / ``tp_free``
-// (and, on FT, the pre-bump ``tp_dealloc`` slot). These slots are NOT inherited by
-// dynamically created subtypes (CPython resets them per dynamic subtype), so every
-// registered type is patched at its Cython registration choke point. Idempotent; no-op
-// when ``type_obj`` is not a type object.
+// ``TVMFFIPyInstallTypeSlots`` patches a registered type's ``tp_alloc`` / ``tp_free``.
+// These slots are NOT inherited by dynamically created subtypes (CPython resets them per
+// dynamic subtype), so every registered type is patched at its Cython registration choke
+// point. Idempotent; no-op when ``type_obj`` is not a type object. Build-agnostic: the
+// pre-bump ``tp_dealloc`` interception lives in ``TVMFFIPyWrapDealloc`` (FT only), called
+// separately per carrier at init -- not here -- so this body is identical on both builds (the
+// GIL build needs no dealloc slot: the bump UAF cannot occur under the GIL).
 //
-// ``TVMFFIPyInstallTypeSlotsForOpaque`` extends coverage to ``OpaquePyObject`` -- the one
-// cdef carrier built via ``__new__`` that bypasses the registration funnel. On FT this
-// makes slot coverage of the closed ``CObject`` cdef family total (the invariant that
-// lets ``TVMFFIPyTpDealloc`` be an unconditional FT no-op). On the GIL build it is a NO-OP
-// -- ``OpaquePyObject`` keeps its default slots, exactly as before, so the GIL build is
-// unchanged. (The extra slots would be inert for it anyway: never bound Active in any
-// word, so ``tp_alloc`` always misses to ``PyType_GenericAlloc`` and ``tp_free`` always
-// takes the plain path; only the pre-bump dealloc routing matters.)
-//
-// ``TVMFFIPyRegisterDefaultAllocator`` (shared, below the split) installs the process-wide
-// block allocator once at module init.
+// ``TVMFFIPyRegisterDefaultAllocator`` (below) installs the process-wide block allocator once
+// at module init.
 //---------------------------------------------------------------
 
-#ifdef Py_GIL_DISABLED
 extern "C" TVM_FFI_INLINE void TVMFFIPyInstallTypeSlots(PyObject* type_obj) {
   if (type_obj == nullptr || !PyType_Check(type_obj)) return;
   PyTypeObject* tp = reinterpret_cast<PyTypeObject*>(type_obj);
   tp->tp_alloc = &TVMFFIPyTpAlloc;
   tp->tp_free = &TVMFFIPyTpFree;
-  // Install the pre-bump dealloc slot on the nearest non-heap (cdef) ancestor -- the
-  // exact type ``subtype_dealloc`` base-walks to for a heap subtype, and ``tp`` itself
-  // for a cdef class. Wrapping there intercepts every death pre-bump without re-entering
-  // ``subtype_dealloc`` (which we never replace). Heap subtypes keep ``subtype_dealloc``.
-  if (PyTypeObject* base = TVMFFIPyNearestCdefBase(tp)) {
-    TVMFFIPyWrapDealloc(base);
-  }
 }
-extern "C" TVM_FFI_INLINE void TVMFFIPyInstallTypeSlotsForOpaque(PyObject* type_obj) {
-  TVMFFIPyInstallTypeSlots(type_obj);  // give the registration-bypass carrier the slots too
-}
-#else
-extern "C" TVM_FFI_INLINE void TVMFFIPyInstallTypeSlots(PyObject* type_obj) {
-  if (type_obj == nullptr || !PyType_Check(type_obj)) return;
-  PyTypeObject* tp = reinterpret_cast<PyTypeObject*>(type_obj);
-  tp->tp_alloc = &TVMFFIPyTpAlloc;
-  tp->tp_free =
-      &TVMFFIPyTpFree;  // no custom tp_dealloc slot: the bump UAF cannot occur under the GIL
-}
-extern "C" TVM_FFI_INLINE void TVMFFIPyInstallTypeSlotsForOpaque(PyObject* type_obj) {
-  (void)type_obj;  // OpaquePyObject keeps its default slots on the GIL build
-}
-#endif
 
 /*!
  * \brief Install ``TVMFFIPyAllocate`` as the process-wide custom allocator.

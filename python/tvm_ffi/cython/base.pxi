@@ -367,8 +367,14 @@ cdef extern from "tvm_ffi_python_helpers.h":
     void TVMFFIPyRebindPyObject(void* chandle, PyObject* expect, PyObject* neo) noexcept
     void TVMFFIPyTpDealloc(void** ptr_to_chandle, PyObject* wrapper) noexcept
     void TVMFFIPyInstallTypeSlots(PyObject* type_obj) noexcept
-    void TVMFFIPyInstallTypeSlotsForOpaque(PyObject* type_obj) noexcept
     object TVMFFIPyMakeRetObject(void* chandle, PyObject* cls_type)
+
+    # Pre-bump tp_dealloc installer (free-threaded builds only; a no-op symbol on the GIL build).
+    # Called once per cdef CObject-family carrier right after the class is defined, so a wrapper
+    # that crosses threads runs its binding transition before Cython's resurrection bump. ``name``
+    # is the carrier tag dispatched on (must match a carrier in the C-side list); the carrier set
+    # is compile-time fixed.
+    void TVMFFIPyWrapDealloc(PyObject* type_obj, const char* name) noexcept
 
     # no need to expose fields of the call context setter data structure
     ctypedef struct TVMFFIPyCallContext:

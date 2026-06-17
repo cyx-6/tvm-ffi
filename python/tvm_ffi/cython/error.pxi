@@ -105,6 +105,10 @@ cdef class Error(CObject):
         return bytearray_to_str(&(TVMFFIErrorGetCellPtr(self.chandle).backtrace))
 
 
+# Install the free-threaded pre-bump tp_dealloc slot on this cdef carrier (no-op on the GIL).
+TVMFFIPyWrapDealloc(<PyObject*>Error, b"Error")
+
+
 cdef inline Error move_from_last_error():
     # raise last error
     error = Error.__new__(Error)

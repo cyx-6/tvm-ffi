@@ -188,6 +188,12 @@ cdef class CObject:
         TVMFFIPyRebindPyObject(chandle, NULL, <PyObject*>self)
 
 
+# Install the free-threaded pre-bump tp_dealloc slot on each cdef carrier, once, right after
+# its class is defined (no-op on the GIL build). Heap subtypes are covered for free via
+# subtype_dealloc's base-walk into the nearest wrapped carrier.
+TVMFFIPyWrapDealloc(<PyObject*>CObject, b"CObject")
+
+
 cdef class CContainerBase(CObject):
     """Cython base for container types that support lazy DLPack conversion.
 
@@ -358,6 +364,9 @@ class Object(CObject, metaclass=_ObjectSlotsMeta):
         CObject.__init_handle_by_constructor__(self, fconstructor, *args)
 
 
+TVMFFIPyWrapDealloc(<PyObject*>CContainerBase, b"CContainerBase")
+
+
 cdef class OpaquePyObject(CObject):
     """Wrapper that carries an arbitrary Python object across the FFI.
 
@@ -380,7 +389,7 @@ cdef class OpaquePyObject(CObject):
         return obj
 
 
-TVMFFIPyInstallTypeSlotsForOpaque(<PyObject*>OpaquePyObject)
+TVMFFIPyWrapDealloc(<PyObject*>OpaquePyObject, b"OpaquePyObject")
 
 
 class PyNativeObject:

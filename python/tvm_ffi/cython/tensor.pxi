@@ -370,6 +370,8 @@ cdef class Tensor(CObject):
 
 
 _set_class_tensor(Tensor)
+# Install the free-threaded pre-bump tp_dealloc slot on this cdef carrier (no-op on the GIL).
+TVMFFIPyWrapDealloc(<PyObject*>Tensor, b"Tensor")
 
 
 cdef int _dltensor_test_wrapper_from_pyobject(

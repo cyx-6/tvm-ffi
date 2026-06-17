@@ -1083,6 +1083,10 @@ cdef class Function(CObject):
         return func
 
 
+# Install the free-threaded pre-bump tp_dealloc slot on this cdef carrier (no-op on the GIL).
+TVMFFIPyWrapDealloc(<PyObject*>Function, b"Function")
+
+
 def _register_global_func(name: str, pyfunc: Callable[..., Any] | Function, override: bool) -> Function:
     cdef TVMFFIObjectHandle chandle
     cdef int c_api_ret_code
