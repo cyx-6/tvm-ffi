@@ -1,0 +1,20 @@
+diff --git a/python/tvm_ffi/cython/base.pxi b/python/tvm_ffi/cython/base.pxi
+index f711265..1dc1e7f 100644
+--- a/python/tvm_ffi/cython/base.pxi
++++ b/python/tvm_ffi/cython/base.pxi
+@@ -562,7 +562,14 @@ cdef _init_env_api():
+ _init_env_api()
+ 
+ 
+-CHECK_CALL(TVMFFIPyRegisterDefaultAllocator())
++# BENCH-ONLY TOGGLE (not for merge): skip registering the Python custom allocator so every
++# chandle stays non-canonical and all PyObject-tying hot paths take their pre-PR fast path.
++# Lets the head binary run "tying off" as a benchmark reference. Read once at import -> zero
++# per-op cost. Applied only inside the throwaway head worktree by bench/run_bench.sh; see
++# bench/README.md.
++import os as _tvm_ffi_os
++if _tvm_ffi_os.environ.get("TVM_FFI_DISABLE_TYING") != "1":
++    CHECK_CALL(TVMFFIPyRegisterDefaultAllocator())
+ 
+ import atexit as _tvm_ffi_atexit
+ _tvm_ffi_atexit.register(TVMFFIPyMarkPythonFinalizing)
