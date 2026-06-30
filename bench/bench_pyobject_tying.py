@@ -22,9 +22,9 @@ Runs identically on three configs (one binary each, head toggled by env):
   - head-off  (HEAD + TVM_FFI_DISABLE_TYING=1): machinery present but inert.
   - head-on   (HEAD): full tying.
 
-Core ops across object width (#fields) and access depth (nesting), function-call
-arity, and Array indexing. Plus a C++ make_object microbench and a memory probe.
-Output lines are machine-parseable by make_table.py.
+Core ops across object width (#fields) and access depth (nesting), C++->Python
+callback arity, and Array indexing. Plus a C++ make_object microbench and a memory
+probe. Output lines are machine-parseable by make_table.py.
 
 Two attribute-access regimes, deliberately distinct:
   * attr_hit   -- the child wrapper is HELD alive (anchored), so each access is a
@@ -283,7 +283,22 @@ def _invoke_cpp_src() -> str:
     return "\n".join(parts)
 
 
-def register_calls(b: Bench) -> None:
+def register_callbacks(b: Bench) -> None:
+    """C++ -> Python callback path: a C++ loop (``invoke_n_K``) invokes a Python callable
+    ``CALL_N`` times, so the per-iteration cost is materializing each ``AnyView`` arg into a
+    Python wrapper to enter the callee (the tying path), NOT C++->C++ dispatch.
+
+    The C++ loop is the harness, not the subject: it keeps the Python interpreter (loop
+    bytecode, args-tuple build, outbound Python->AnyView conversion) OUT of the per-call
+    measurement, leaving only the inbound crossing + wrapper materialization. Args are
+    converted to AnyView once on entry and reused; the single ``arg`` is anchored, so each
+    arg is an Active-hit (tying increfs the canonical wrapper; off allocates+frees a fresh one).
+
+      * callback.discard.argsK -- callee ``lambda *a: None`` drops its args; isolates the
+                                  inbound per-arg wrapper cost, scaled by arity.
+      * callback.identity.args1 -- callee ``lambda y: y`` returns its arg; also exercises the
+                                  RETURN-path wrapper (identity-return reuses the cached wrapper).
+    """
     mod = tvm_ffi.cpp.load_inline(
         name="bench_tying_invoke_n",
         cpp_sources=_invoke_cpp_src(),
@@ -304,7 +319,7 @@ def register_calls(b: Bench) -> None:
             _inv(_f, CALL_N, *_a)
             return (time.perf_counter_ns() - t0) / CALL_N / 1e9
 
-        b.add(f"call.plain.args{k}", sample)
+        b.add(f"callback.discard.args{k}", sample)
 
     identity = tvm_ffi.convert(lambda y: y)
     b.keep(identity)
@@ -315,7 +330,7 @@ def register_calls(b: Bench) -> None:
         _inv(_f, CALL_N, _x)
         return (time.perf_counter_ns() - t0) / CALL_N / 1e9
 
-    b.add("call.identity_return.args1", sample_id)
+    b.add("callback.identity.args1", sample_id)
 
 
 def register_array(b: Bench) -> None:
@@ -459,7 +474,7 @@ def main() -> None:
     b = Bench()
     register_attr(b)
     register_create(b)
-    register_calls(b)
+    register_callbacks(b)
     register_array(b)
     register_cpp(b)
     b.run(TRIALS)

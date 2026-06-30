@@ -19,8 +19,8 @@
 
 Before/after micro-benchmark for **PR #593** ("Tie Python wrapper lifetime to the
 underlying C++ FFI object"). It quantifies the latency and memory overhead the PR adds
-to the hottest Python-binding paths — attribute access, object creation, function
-return, `Array` indexing — and the C++ allocator itself.
+to the hottest Python-binding paths — attribute access, object creation, C++→Python
+callbacks, `Array` indexing — and the C++ allocator itself.
 
 This directory is **self-contained tooling**: a fresh clone reproduces the whole study
 with one command. Nothing here is imported by the package or exercised by CI.
@@ -108,7 +108,7 @@ anytime with `bench/run_bench.sh clean`.
 - A trailing `*` marks a cell whose **floor was not certified** — host noise (shared-VM
   memory-bandwidth contention) kept the fast samples from converging. The C++ microbench
   self-certifies adaptively and flags honestly rather than silently trusting a noisy number.
-- Expect: `Δtying` is largest for **attribute-hit** and **identity-return** (tying reuses the
+- Expect: `Δtying` is largest for **attribute-hit** and **callback-identity** (tying reuses the
   cached wrapper instead of allocating a fresh one), modest for churn (revive vs malloc), and
   near-zero for the C++ allocator. On 3.12/3.13, `main` is an `abi3` build, so `Δlayout` there
   is dominated by the limited-API → version-specific ABI switch, not by tying.
