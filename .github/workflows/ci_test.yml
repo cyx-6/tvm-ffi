@@ -25,6 +25,9 @@ on:
       - main
       # dev branch is used for testing purposes
       - dev
+      # TEMP: Windows + free-threaded (3.14t) ABI-portability verification for the
+      # PyObject-tying spin-lock (PR #593). Remove with the matrix trim below.
+      - pyobject-win-ft-verify
 
 jobs:
   prepare:
@@ -120,20 +123,22 @@ jobs:
           BUILD_CPP_DOCS=1 uv run --group docs sphinx-build -W --keep-going -b html docs docs/_build/html
 
   test:
-    needs: [lint, prepare]
+    # TEMP (PR #593 verify): dropped `lint` from needs so this runs even while the
+    # fork's lint job is red on unrelated checks. Restore `[lint, prepare]` on revert.
+    needs: [prepare]
     if: >
       needs.prepare.outputs.should_skip_ci_commit != 'true' &&
       needs.prepare.outputs.should_skip_ci_docs_only != 'true'
-    name: ${{ matrix.os }}
+    name: ${{ matrix.os }} ${{ matrix.python_version }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
-          - {os: ubuntu-latest, arch: x86_64, python_version: '3.14t'}
-          - {os: ubuntu-24.04-arm, arch: aarch64, python_version: '3.14'}
-          - {os: windows-latest, arch: AMD64, python_version: '3.9'}
-          - {os: macos-14, arch: arm64, python_version: '3.13'}
+          # TEMP (PR #593 verify): trimmed to the one untested corner — Windows +
+          # free-threaded (MSVC + Py_GIL_DISABLED), which exercises the spin-lock's
+          # __atomic_* leaves. Restore the full 4-leg matrix on revert.
+          - {os: windows-latest, arch: AMD64, python_version: '3.14t'}
 
     steps:
       - uses: actions/checkout@v5
