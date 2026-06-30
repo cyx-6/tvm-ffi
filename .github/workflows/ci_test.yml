@@ -129,16 +129,22 @@ jobs:
     if: >
       needs.prepare.outputs.should_skip_ci_commit != 'true' &&
       needs.prepare.outputs.should_skip_ci_docs_only != 'true'
-    name: ${{ matrix.os }} ${{ matrix.python_version }}
+    name: ${{ matrix.os }} ${{ matrix.arch }} ${{ matrix.python_version }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # TEMP (PR #593 verify): trimmed to the one untested corner — Windows +
-          # free-threaded (MSVC + Py_GIL_DISABLED), which exercises the spin-lock's
-          # __atomic_* leaves. Restore the full 4-leg matrix on revert.
-          - {os: windows-latest, arch: AMD64, python_version: '3.14t'}
+          # TEMP (PR #593 verify): trimmed to the untested Windows + free-threaded corner
+          # (MSVC + Py_GIL_DISABLED), which exercises the spin-lock's __atomic_* leaves.
+          # Two legs: x86_64 (TSO memory model) and arm64 (weak memory model — exercises the
+          # _Interlocked* ordering for real). `uv_python` is the explicit, arch-pinned request
+          # so the arm64 leg cannot silently fall back to emulated x86_64 (uv's WoA default).
+          # Restore the full 4-leg matrix on revert.
+          - {os: windows-latest, arch: AMD64, python_version: '3.14t',
+             uv_python: 'cpython-3.14+freethreaded-windows-x86_64-none', expect_machine: 'AMD64'}
+          - {os: windows-11-arm, arch: ARM64, python_version: '3.14t',
+             uv_python: 'cpython-3.14+freethreaded-windows-aarch64-none', expect_machine: 'ARM64'}
 
     steps:
       - uses: actions/checkout@v5
@@ -158,7 +164,7 @@ jobs:
 
       # Run C++ tests
       - name: Run cpp tests
-        if: ${{ matrix.os != 'windows-latest' }}
+        if: ${{ runner.os != 'Windows' }}
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: ${{ steps.env_vars.outputs.cpu_count }}
         run: |
@@ -166,7 +172,7 @@ jobs:
           cmake --build build_test --clean-first --config Debug --target tvm_ffi_tests
           ctest -V -C Debug --test-dir build_test --output-on-failure
       - name: Run cpp tests[windows]
-        if: ${{ matrix.os == 'windows-latest' }}
+        if: ${{ runner.os == 'Windows' }}
         shell: cmd
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: ${{ steps.env_vars.outputs.cpu_count }}
@@ -176,7 +182,7 @@ jobs:
           ctest -V -C Debug --test-dir build_test --output-on-failure
 
       - name: Locate and Set VsDevCmd Path [windows]
-        if: ${{ matrix.os == 'windows-latest' }}
+        if: ${{ runner.os == 'Windows' }}
         shell: pwsh
         run: |
           # Captures the output (path) from your Python script
@@ -185,23 +191,37 @@ jobs:
           # Sets an environment variable for all subsequent steps in this job
           "VS_DEV_CMD_PATH=$vsPath" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      # Run Python tests
+      # Run Python tests. The arch-explicit request (matrix.uv_python) pins the native
+      # interpreter so the arm64 leg cannot fall back to uv's emulated-x86_64 WoA default.
       - name: Setup Python ${{ matrix.python_version }}
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
         with:
-          python-version: ${{ matrix.python_version }}
+          python-version: ${{ matrix.uv_python || matrix.python_version }}
           activate-environment: true
+      # Guard: fail loudly if the active interpreter is not the expected NATIVE machine and
+      # free-threaded. Without this, an emulated x86_64 interpreter on the arm64 runner would
+      # silently retest the x86_64 path and report fake arm64 coverage.
+      - name: Assert native free-threaded interpreter
+        shell: python
+        run: |
+          import platform, sys, sysconfig
+          machine = platform.machine()
+          ft = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+          print(f"machine={machine} version={sys.version} Py_GIL_DISABLED={ft}")
+          expect = "${{ matrix.expect_machine }}"
+          assert machine.upper() == expect.upper(), f"expected {expect}, got {machine} (emulation?)"
+          assert ft, "expected a free-threaded (Py_GIL_DISABLED) interpreter"
       - name: Build and install python package
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: ${{ steps.env_vars.outputs.cpu_count }}
         run: |
           uv pip install --reinstall --verbose --group test -e .
       - name: Run python tests
-        if: ${{ matrix.os != 'windows-latest' }}
+        if: ${{ runner.os != 'Windows' }}
         run: |
           pytest -vvs tests/python
       - name: Run python tests [windows]
-        if: ${{ matrix.os == 'windows-latest' }}
+        if: ${{ runner.os == 'Windows' }}
         shell: cmd
         run: |
           call "%VS_DEV_CMD_PATH%"
