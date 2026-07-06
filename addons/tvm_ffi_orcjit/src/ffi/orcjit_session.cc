@@ -203,8 +203,25 @@ ORCJITExecutionSession::ORCJITExecutionSession(const std::string& orc_rt_path,
   data_ = std::move(obj);
 }
 
+ORCJITExecutionSession ORCJITExecutionSession::Global(const std::string& orc_rt_path) {
+  // Leaked via raw `new` and never freed: the owned LLJIT + slab arena must not
+  // tear down during interpreter finalization / LLVM static destruction (the
+  // teardown can call back into the host language). The OS reclaims at exit.
+  // Same idiom as GlobalFunctionTable::Global() (src/ffi/function.cc) and
+  // TypeTable::Global() (src/ffi/object.cc). The static holds one ref forever,
+  // so the refcount never hits zero; first-call orc_rt_path wins.
+  static ORCJITExecutionSession* inst = new ORCJITExecutionSession(orc_rt_path);
+  return *inst;
+}
+
 ORCJITDynamicLibrary ORCJITExecutionSessionObj::CreateDynamicLibrary(const String& name) {
   TVM_FFI_CHECK(jit_ != nullptr, InternalError) << "ExecutionSession not initialized";
+
+  // Serialize the whole create sequence (createJITDylib + link order + the
+  // dylib constructor, which resolves context symbols via GetSymbol) against
+  // concurrent create/lookup/teardown on a shared session. Recursive lock, so
+  // the nested GetSymbol re-acquisition on this thread is fine.
+  auto lock = LockSession();
 
   // Generate name if not provided
   String lib_name = name;
@@ -250,41 +267,57 @@ llvm::orc::LLJIT& ORCJITExecutionSessionObj::GetLLJIT() {
 
 using CtorDtor = void (*)();
 
+namespace {
+void SortAndRunInitFini(std::vector<ORCJITExecutionSessionObj::InitFiniEntry>* entries) {
+  using InitFiniEntry = ORCJITExecutionSessionObj::InitFiniEntry;
+  llvm::sort(*entries, [](const InitFiniEntry& a, const InitFiniEntry& b) {
+    if (a.section != b.section) return static_cast<int>(a.section) < static_cast<int>(b.section);
+    return a.priority < b.priority;
+  });
+  for (const auto& entry : *entries) {
+    entry.address.toPtr<CtorDtor>()();
+  }
+}
+}  // namespace
+
 void ORCJITExecutionSessionObj::RunPendingInitializers(llvm::orc::JITDylib& jit_dylib) {
-  auto it = pending_initializers_.find(&jit_dylib);
-  if (it != pending_initializers_.end()) {
-    llvm::sort(it->second, [](const InitFiniEntry& a, const InitFiniEntry& b) {
-      if (a.section != b.section) return static_cast<int>(a.section) < static_cast<int>(b.section);
-      return a.priority < b.priority;
-    });
-    for (const auto& entry : it->second) {
-      entry.address.toPtr<CtorDtor>()();
-    }
+  // Drain under the lock, then run unlocked: a JIT'd ctor can re-enter
+  // AddPendingInitializer on this thread. session_mu_ is recursive so nesting
+  // within a single thread is fine, but we still execute the collected pointers
+  // outside the lock so ctors don't hold it across arbitrary user code.
+  std::vector<InitFiniEntry> entries;
+  {
+    auto lock = LockSession();
+    auto it = pending_initializers_.find(&jit_dylib);
+    if (it == pending_initializers_.end()) return;
+    entries = std::move(it->second);
     pending_initializers_.erase(it);
   }
+  SortAndRunInitFini(&entries);
 }
 
 void ORCJITExecutionSessionObj::RunPendingDeinitializers(llvm::orc::JITDylib& jit_dylib) {
-  auto it = pending_deinitializers_.find(&jit_dylib);
-  if (it != pending_deinitializers_.end()) {
-    llvm::sort(it->second, [](const InitFiniEntry& a, const InitFiniEntry& b) {
-      if (a.section != b.section) return static_cast<int>(a.section) < static_cast<int>(b.section);
-      return a.priority < b.priority;
-    });
-    for (const auto& entry : it->second) {
-      entry.address.toPtr<CtorDtor>()();
-    }
+  // See RunPendingInitializers: drain under the lock, execute unlocked.
+  std::vector<InitFiniEntry> entries;
+  {
+    auto lock = LockSession();
+    auto it = pending_deinitializers_.find(&jit_dylib);
+    if (it == pending_deinitializers_.end()) return;
+    entries = std::move(it->second);
     pending_deinitializers_.erase(it);
   }
+  SortAndRunInitFini(&entries);
 }
 
 void ORCJITExecutionSessionObj::AddPendingInitializer(llvm::orc::JITDylib* jit_dylib,
                                                       const InitFiniEntry& entry) {
+  auto lock = LockSession();
   pending_initializers_[jit_dylib].push_back(entry);
 }
 
 void ORCJITExecutionSessionObj::AddPendingDeinitializer(llvm::orc::JITDylib* jit_dylib,
                                                         const InitFiniEntry& entry) {
+  auto lock = LockSession();
   pending_deinitializers_[jit_dylib].push_back(entry);
 }
 
@@ -299,6 +332,11 @@ int64_t ORCJITExecutionSessionObj::ClearFreeSlabs() {
 
 void ORCJITExecutionSessionObj::RemoveDylib(llvm::orc::JITDylib* jit_dylib) {
   if (jit_dylib == nullptr) return;
+  // Serialize teardown against concurrent create/lookup/teardown on a shared
+  // session: removeJITDylib triggers JITDylib::clear(), part of which runs
+  // outside LLVM's SessionMutex, and overlapping it with another thread's
+  // create/lookup corrupts linker state.
+  auto lock = LockSession();
   // Drop any pending init/fini records keyed by this JITDylib*. After removal
   // the address may be recycled for a freshly-created JITDylib; leftover
   // entries would then be attributed to the wrong dylib.

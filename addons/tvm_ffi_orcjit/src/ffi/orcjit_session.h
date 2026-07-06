@@ -32,6 +32,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -95,6 +96,28 @@ class ORCJITExecutionSessionObj : public Object {
   void RunPendingInitializers(llvm::orc::JITDylib& jit_dylib);
   void RunPendingDeinitializers(llvm::orc::JITDylib& jit_dylib);
 
+  /*!
+   * \brief Acquire the session-wide lock that serializes every operation which
+   *  mutates this session's JITDylib topology: create / add object / set link
+   *  order / symbol lookup / teardown.
+   *
+   *  A shared session is driven concurrently by multiple framework threads (the
+   *  FFI call path releases the GIL). The underlying LLVM calls are each
+   *  internally locked, but our compound operations are not atomic with respect
+   *  to one another, and concurrent JITDylib create/lookup/remove corrupts the
+   *  linker state (observed as a libmalloc abort on macOS). This lock makes each
+   *  compound operation mutually exclusive.
+   *
+   *  It is recursive because these operations nest on one thread — e.g.
+   *  CreateDynamicLibrary constructs a library whose constructor calls
+   *  GetSymbol, and a JIT'd constructor may re-enter get_function. Calling an
+   *  already-resolved Function does NOT take this lock, so the hot path stays
+   *  lock-free.
+   */
+  std::unique_lock<std::recursive_mutex> LockSession() {
+    return std::unique_lock<std::recursive_mutex>(session_mu_);
+  }
+
   void AddPendingInitializer(llvm::orc::JITDylib* jd, const InitFiniEntry& entry);
   void AddPendingDeinitializer(llvm::orc::JITDylib* jd, const InitFiniEntry& entry);
 
@@ -134,6 +157,12 @@ class ORCJITExecutionSessionObj : public Object {
 
   std::unordered_map<llvm::orc::JITDylib*, std::vector<InitFiniEntry>> pending_initializers_;
   std::unordered_map<llvm::orc::JITDylib*, std::vector<InitFiniEntry>> pending_deinitializers_;
+
+  /*! \brief Serializes JITDylib-topology-mutating operations on this session.
+   *  See LockSession(). Recursive because those operations nest on one thread.
+   *  Also covers the pending_* maps above (drained under this lock, executed
+   *  outside it to avoid re-entrant deadlock). */
+  std::recursive_mutex session_mu_;
 };
 
 /*!
@@ -148,6 +177,17 @@ class ORCJITExecutionSession : public ObjectRef {
    * \return The created execution session instance
    */
   explicit ORCJITExecutionSession(const std::string& orc_rt_path = "", int64_t slab_size_bytes = 0);
+
+  /*!
+   * \brief Return the process-wide shared ExecutionSession.
+   *
+   * Libraries created on it share one \c llvm::orc::ExecutionSession (process
+   * symbols, slab arena, cross-library link order). The first call's
+   * \p orc_rt_path wins; it always uses the default slab arena. Never
+   * destroyed, so it is safe to use during interpreter shutdown.
+   */
+  static ORCJITExecutionSession Global(const std::string& orc_rt_path = "");
+
   // Required: define object reference methods
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(ORCJITExecutionSession, ObjectRef,
                                                 ORCJITExecutionSessionObj);

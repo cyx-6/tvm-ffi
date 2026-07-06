@@ -79,6 +79,10 @@ ORCJITDynamicLibraryObj::ORCJITDynamicLibraryObj(ORCJITExecutionSession session,
 }
 
 ORCJITDynamicLibraryObj::~ORCJITDynamicLibraryObj() {
+  // Serialize the whole teardown (deinit + macOS atexit drain + RemoveDylib)
+  // against concurrent create/lookup/teardown on a shared session. Recursive
+  // lock, so the nested acquisitions inside Run*/RemoveDylib are fine.
+  auto lock = session_->LockSession();
   // Step 1: run static destructors for code in this JITDylib via our
   // InitFiniPlugin (uniform across Linux / macOS / Windows — see the
   // plugin docstring in llvm_patches/init_fini_plugin.h).
@@ -111,11 +115,16 @@ void ORCJITDynamicLibraryObj::AddObjectFile(const String& path) {
     TVM_FFI_THROW(IOError) << "Failed to read object file: " << path;
   }
 
+  // Serialize against concurrent create/lookup/teardown on a shared session.
+  auto lock = session_->LockSession();
   // Add object file to this JITDylib
   TVM_FFI_ORCJIT_LLVM_CALL(jit_->addObjectFile(*dylib_, std::move(*buffer_or_err)));
 }
 
 void ORCJITDynamicLibraryObj::SetLinkOrder(const std::vector<llvm::orc::JITDylib*>& dylibs) {
+  // Serialize against concurrent create/lookup/teardown on a shared session
+  // (setLinkOrder mutates JITDylib::LinkOrder, which lookups read).
+  auto lock = session_->LockSession();
   // Rebuild the link order: user-specified libraries first, then the LLJIT
   // default link order (Main → Platform → ProcessSymbols).  Preserving the
   // default link order is essential — without ProcessSymbols, C++ objects
@@ -134,6 +143,11 @@ void ORCJITDynamicLibraryObj::SetLinkOrder(const std::vector<llvm::orc::JITDylib
 }
 
 void* ORCJITDynamicLibraryObj::GetSymbol(const String& name) {
+  // Serialize the lookup + initializer run against concurrent
+  // create/lookup/teardown on a shared session. Recursive lock: a JIT'd
+  // constructor fired by RunPendingInitializers may re-enter get_function on
+  // this thread.
+  auto lock = session_->LockSession();
   // Build search order: this dylib first, then all linked dylibs
   llvm::orc::JITDylibSearchOrder search_order;
   search_order.emplace_back(dylib_, llvm::orc::JITDylibLookupFlags::MatchAllSymbols);
@@ -210,6 +224,10 @@ static void RegisterOrcJITFunctions() {
       .def("orcjit.ExecutionSession",
            [](const std::string& orc_rt_path, int64_t slab_size_bytes) {
              return ORCJITExecutionSession(orc_rt_path, slab_size_bytes);
+           })
+      .def("orcjit.GlobalExecutionSession",
+           [](const std::string& orc_rt_path) {
+             return ORCJITExecutionSession::Global(orc_rt_path);
            })
       .def("orcjit.ExecutionSessionCreateDynamicLibrary",
            [](const ORCJITExecutionSession& session, const String& name) -> Module {

@@ -82,9 +82,9 @@ except Exception as e:
     warnings.warn(f"Failed to explicitly initialize orcjit library: {e}")
 
 from .dylib import DynamicLibrary
-from .session import ExecutionSession
+from .session import ExecutionSession, global_session
 
-__all__ = ["DynamicLibrary", "ExecutionSession"]
+__all__ = ["DynamicLibrary", "ExecutionSession", "global_session"]
 
 try:
     from importlib.metadata import version

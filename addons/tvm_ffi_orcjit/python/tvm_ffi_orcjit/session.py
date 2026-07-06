@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import functools
 import sys
 
 from tvm_ffi import Object, register_object
@@ -130,3 +131,25 @@ class ExecutionSession(Object):
 
         """
         return int(_ffi_api.ExecutionSessionClearFreeSlabs(self))  # type: ignore
+
+
+@functools.cache
+def global_session() -> ExecutionSession:
+    """Return the process-wide shared ExecutionSession.
+
+    All callers share one underlying ``llvm::orc::ExecutionSession``, so
+    libraries created on it share process symbols and the slab arena and can
+    ``set_link_order`` across each other — including between different
+    frameworks (e.g. torch and cutedsl). It is owned in C++ and never torn
+    down, so it is safe to use during interpreter shutdown. For a private
+    session or a tuned arena, construct :class:`ExecutionSession` directly.
+
+    Library names must be unique within the shared session, so prefer namespaced
+    names (e.g. ``"torch.main"``) or auto-naming (``create_library()``).
+
+    Returns:
+        The shared :class:`ExecutionSession` instance.
+
+    """
+    orc_rt_path = _find_orc_rt_library() or ""
+    return _ffi_api.GlobalExecutionSession(orc_rt_path)  # type: ignore
