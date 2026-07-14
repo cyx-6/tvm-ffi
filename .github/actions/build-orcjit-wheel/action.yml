@@ -43,15 +43,48 @@ runs:
     - uses: ./.github/actions/detect-env-vars
       id: env_vars
 
-    # ---- Install LLVM (DEMO STEP 1: el8 AppStream 21.1.8 via bare dnf, at the manylinux floor) ----
-    # No host-side conda / cache / volume mount on Linux: LLVM installs INSIDE the manylinux_2_28
-    # container via CIBW_BEFORE_ALL_LINUX (below), and find_package(LLVM) then auto-discovers /usr --
-    # so LLVM_PREFIX is unset on Linux. macOS/Windows are out of scope for this demo.
-    #
-    # This first pass uses the STABLE el8 distro LLVM (bare `dnf install`, resolves to 21.1.8) to
-    # verify the workflow mechanics -- dynamic libstdc++ + clean --exclude-libs,ALL + auditwheel --
-    # in isolation from the LLVM-23-pre ORC API churn (big-merge failed to compile orcjit_session.cc
-    # against trunk). Swap to the big-merge COPR snapshot once the 23 API break is patched.
+    # ---- Cache LLVM prefix ----
+    - name: Cache LLVM
+      uses: actions/cache@v4
+      id: llvm-cache
+      with:
+        path: ${{ runner.os == 'Windows' && 'C:/opt/llvm' || '/opt/llvm' }}
+        key: llvm-22.1.0-${{ runner.os }}-${{ inputs.arch }}-v3
+
+    # ---- Install LLVM via conda (cache miss only) ----
+    - name: Setup conda
+      if: steps.llvm-cache.outputs.cache-hit != 'true'
+      uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167  # v3.3.0
+      continue-on-error: true
+      id: conda1
+      with:
+        miniforge-version: latest
+
+    - name: Setup conda (retry with tar.bz2)
+      if: steps.llvm-cache.outputs.cache-hit != 'true' && steps.conda1.outcome == 'failure'
+      uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167  # v3.3.0
+      with:
+        miniforge-version: latest
+        use-only-tar-bz2: true
+
+    - name: Create /opt/llvm (macOS)
+      if: steps.llvm-cache.outputs.cache-hit != 'true' && runner.os == 'macOS'
+      shell: bash
+      run: sudo mkdir -p /opt/llvm && sudo chown -R $(whoami) /opt/llvm
+
+    - name: Install LLVM (Unix)
+      if: steps.llvm-cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
+      shell: bash -l {0}
+      run: |
+        conda create -q -p /opt/llvm -c conda-forge \
+          llvmdev=22.1.0 clangdev=22.1.0 compiler-rt=22.1.0 zlib zstd-static \
+          -y
+
+    - name: Install LLVM (Windows)
+      if: steps.llvm-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+      shell: cmd /C call {0}
+      run: |
+        conda create -q -p C:\opt\llvm -c conda-forge llvmdev=22.1.0 zlib zstd-static -y
 
     # ---- Build and test wheels ----
     - name: Build and test wheels
@@ -66,15 +99,9 @@ runs:
         CIBW_ARCHS_WINDOWS: ${{ inputs.arch }}
         CIBW_BUILD_VERBOSITY: 1
         CMAKE_BUILD_PARALLEL_LEVEL: ${{ steps.env_vars.outputs.cpu_count }}
-        # DEMO STEP 1: bare dnf on el8 AppStream -> LLVM 21.1.8 (module_el8), built under the el8
-        # toolchain so its libstdc++ floor == manylinux_2_28. compiler-rt provides liborc_rt to
-        # match llvm-static. zlib/zstd -devel come from BaseOS/PowerTools (already in the image
-        # buildroot); the CMake also falls back to the dynamic libs if the static archives are
-        # absent. No `dnf copr enable`, no version pin -- verifying mechanics on stable LLVM first.
-        CIBW_BEFORE_ALL_LINUX: >-
-          dnf install -y --enablerepo=powertools
-          llvm-devel llvm-static clang compiler-rt libzstd-devel zlib-devel zlib-static &&
-          llvm-config --version
+        CIBW_ENVIRONMENT: LLVM_PREFIX=/opt/llvm
+        CIBW_ENVIRONMENT_WINDOWS: LLVM_PREFIX="C:/opt/llvm"
+        CIBW_CONTAINER_ENGINE: "docker; create_args: --volume /opt/llvm:/opt/llvm"
         # Build against the in-tree core (not PyPI) so the addon's tvm_ffi ABI
         # matches the core the tests reinstall; a mismatch segfaults the JIT.
         CIBW_BEFORE_BUILD: pip install "scikit-build-core>=0.10.0" cmake ninja "{project}"

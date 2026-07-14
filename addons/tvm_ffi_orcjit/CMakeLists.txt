@@ -159,20 +159,23 @@ if (APPLE)
     COMMENT "Fixing libc++ rpath to use system library"
   )
 elseif (UNIX AND NOT WIN32)
-  # DEMO (big-merge / manylinux-floor LLVM): libstdc++ is kept DYNAMIC -- no -static-libstdc++.
-  # The LLVM toolchain sits at the manylinux libstdc++ ABI floor (an el8-built fedora-llvm-team
-  # big-merge snapshot), so a dynamic libstdc++ does not import too-recent GLIBCXX_* symbols and
-  # still passes auditwheel. JIT'd C++ resolves its C++ runtime from the process's dynamic
-  # libstdc++.so at run time instead of from a static copy baked into this .so.
+  # DEMO (conda-forge LLVM 22.1.0, unchanged from main): libstdc++ is kept DYNAMIC -- no
+  # -static-libstdc++.  Hypothesis under test: although conda LLVM is built by conda gcc>=14, the
+  # LLVM static archives + this addon only *reference* GLIBCXX symbols up to ~3.4.30 (measured on
+  # libLLVM.so), which is <= the GLIBCXX_3.4.33 that the manylinux_2_28 build image's gcc-toolset-14
+  # libstdc++ provides.  Static-vs-dynamic does not change which symbol versions are imported (that
+  # is code-determined), so a dynamic libstdc++ should still pass auditwheel -- and it lets JIT'd C++
+  # resolve its C++ runtime from the process libstdc++.so instead of a static copy baked in here.
+  # If auditwheel rejects a >3.4.33 symbol, this hypothesis is wrong and static-libstdc++ must return.
 endif ()
 
 # Hide symbols pulled from static archives so they are not re-exported and cannot interpose with a
 # host process's own copies (e.g. PyTorch's bundled LLVM).
 #
-# DEMO: because libstdc++ is now DYNAMIC (see above), the clean `--exclude-libs,ALL` is safe: it
-# localizes every static archive (LLVM/zlib/zstd) while the C++ runtime the JIT needs is served by
-# the dynamic libstdc++.so, not by hidden archive symbols. This replaces the by-name exclude list
-# that the conda build required (where a static libstdc++ made ALL unusable).
+# DEMO: with libstdc++ DYNAMIC (see above), the clean `--exclude-libs,ALL` is safe: it localizes
+# every static archive (LLVM/zlib/zstd) while the C++ runtime the JIT needs is served by the dynamic
+# libstdc++.so, not by hidden archive symbols.  This replaces the by-name exclude list that the
+# static-libstdc++ build required (where ALL would have hidden the baked-in C++ runtime).
 if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android|FreeBSD|NetBSD|OpenBSD" AND CMAKE_CXX_COMPILER_ID
                                                                          MATCHES "GNU|Clang"
 )
