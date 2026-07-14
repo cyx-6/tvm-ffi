@@ -16,7 +16,7 @@
 # under the License.
 
 # DEMO (throwaway): price the orcjit wheel built against a fedora-llvm-team big-merge
-# LLVM 23-pre snapshot (manylinux libstdc++ floor) with dynamic libstdc++ + clean
+# el8 AppStream LLVM 21.1.8 (manylinux libstdc++ floor) with dynamic libstdc++ + clean
 # -Wl,--exclude-libs,ALL. Push-triggered on the demo branch only. Linux-only, candidate
 # arm only -- no PyPI, no macOS/Windows. Compare its cost output against a recent
 # conda-22.1.0 orcjit CI run for the baseline.
@@ -44,7 +44,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Build OrcJIT wheel (big-merge 23-pre, dynamic libstdc++, --exclude-libs,ALL)
+      - name: Build OrcJIT wheel (21.1.8 dnf, dynamic libstdc++, --exclude-libs,ALL)
         uses: ./.github/actions/build-orcjit-wheel
         with:
           arch: ${{ matrix.arch }}

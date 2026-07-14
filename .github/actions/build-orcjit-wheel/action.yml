@@ -43,11 +43,15 @@ runs:
     - uses: ./.github/actions/detect-env-vars
       id: env_vars
 
-    # ---- Install LLVM (DEMO: fedora-llvm-team big-merge, LLVM 23-pre at the manylinux floor) ----
-    # No host-side conda / cache / volume mount on Linux: the el8 RPMs install INSIDE the
-    # manylinux_2_28 container via CIBW_BEFORE_ALL_LINUX (below), and find_package(LLVM) then
-    # auto-discovers /usr -- so LLVM_PREFIX is unset on Linux. macOS/Windows are out of scope for
-    # this demo and are not built by the demo workflow.
+    # ---- Install LLVM (DEMO STEP 1: el8 AppStream 21.1.8 via bare dnf, at the manylinux floor) ----
+    # No host-side conda / cache / volume mount on Linux: LLVM installs INSIDE the manylinux_2_28
+    # container via CIBW_BEFORE_ALL_LINUX (below), and find_package(LLVM) then auto-discovers /usr --
+    # so LLVM_PREFIX is unset on Linux. macOS/Windows are out of scope for this demo.
+    #
+    # This first pass uses the STABLE el8 distro LLVM (bare `dnf install`, resolves to 21.1.8) to
+    # verify the workflow mechanics -- dynamic libstdc++ + clean --exclude-libs,ALL + auditwheel --
+    # in isolation from the LLVM-23-pre ORC API churn (big-merge failed to compile orcjit_session.cc
+    # against trunk). Swap to the big-merge COPR snapshot once the 23 API break is patched.
 
     # ---- Build and test wheels ----
     - name: Build and test wheels
@@ -62,14 +66,14 @@ runs:
         CIBW_ARCHS_WINDOWS: ${{ inputs.arch }}
         CIBW_BUILD_VERBOSITY: 1
         CMAKE_BUILD_PARALLEL_LEVEL: ${{ steps.env_vars.outputs.cpu_count }}
-        # DEMO: install LLVM 23-pre from the pinned big-merge snapshot inside the build container.
-        # The copr plugin auto-detects manylinux_2_28 as chroot "epel-8", but the project only
-        # publishes "rhel-8" (ABI-identical to AlmaLinux 8 / manylinux_2_28), so force the chroot
-        # explicitly. $(arch) -> x86_64 | aarch64 covers both matrix legs with one line.
+        # DEMO STEP 1: bare dnf on el8 AppStream -> LLVM 21.1.8 (module_el8), built under the el8
+        # toolchain so its libstdc++ floor == manylinux_2_28. compiler-rt provides liborc_rt to
+        # match llvm-static. zlib/zstd -devel come from BaseOS/PowerTools (already in the image
+        # buildroot); the CMake also falls back to the dynamic libs if the static archives are
+        # absent. No `dnf copr enable`, no version pin -- verifying mechanics on stable LLVM first.
         CIBW_BEFORE_ALL_LINUX: >-
-          dnf install -y 'dnf-command(copr)' &&
-          dnf copr enable -y @fedora-llvm-team/llvm-snapshots-big-merge-20260714 rhel-8-$(arch) &&
-          dnf install -y llvm-devel llvm-static clang compiler-rt libzstd-devel zlib-devel &&
+          dnf install -y --enablerepo=powertools
+          llvm-devel llvm-static clang compiler-rt libzstd-devel zlib-devel zlib-static &&
           llvm-config --version
         # Build against the in-tree core (not PyPI) so the addon's tvm_ffi ABI
         # matches the core the tests reinstall; a mismatch segfaults the JIT.
