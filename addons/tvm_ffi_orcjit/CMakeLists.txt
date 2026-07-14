@@ -98,11 +98,17 @@ if (WIN32)
     HINTS ${_lib_hints} REQUIRED
   )
 else ()
+  # DEMO: prefer the static archive, but fall back to the dynamic lib -- an el8/big-merge prefix
+  # may ship only libz.so, and a hard REQUIRED on libz.a would abort configure on a packaging
+  # detail rather than exercising the link/auditwheel path we want to measure.
   find_library(
     ZLIB_STATIC
-    NAMES libz.a
-    HINTS ${_lib_hints} REQUIRED
+    NAMES libz.a z
+    HINTS ${_lib_hints}
   )
+  if (NOT ZLIB_STATIC)
+    set(ZLIB_STATIC z)
+  endif ()
 endif ()
 
 # ---- zstd (static, from LLVM prefix) ----
@@ -113,11 +119,15 @@ if (WIN32)
     HINTS ${_lib_hints} REQUIRED
   )
 else ()
+  # DEMO: prefer the static archive, fall back to the dynamic lib (see zlib note above).
   find_library(
     ZSTD_STATIC
-    NAMES libzstd.a
-    HINTS ${_lib_hints} REQUIRED
+    NAMES libzstd.a zstd
+    HINTS ${_lib_hints}
   )
+  if (NOT ZSTD_STATIC)
+    set(ZSTD_STATIC zstd)
+  endif ()
 endif ()
 
 # ---- Link everything ----
@@ -149,25 +159,24 @@ if (APPLE)
     COMMENT "Fixing libc++ rpath to use system library"
   )
 elseif (UNIX AND NOT WIN32)
-  # Static libstdc++/libgcc: the conda LLVM toolchain's libstdc++ is newer than the manylinux ABI
-  # floor, so linking it dynamically would import too-recent GLIBCXX_* symbols and fail auditwheel.
-  target_link_options(tvm_ffi_orcjit PRIVATE -static-libstdc++ -static-libgcc)
+  # DEMO (big-merge / manylinux-floor LLVM): libstdc++ is kept DYNAMIC -- no -static-libstdc++.
+  # The LLVM toolchain sits at the manylinux libstdc++ ABI floor (an el8-built fedora-llvm-team
+  # big-merge snapshot), so a dynamic libstdc++ does not import too-recent GLIBCXX_* symbols and
+  # still passes auditwheel. JIT'd C++ resolves its C++ runtime from the process's dynamic
+  # libstdc++.so at run time instead of from a static copy baked into this .so.
 endif ()
 
 # Hide symbols pulled from static archives so they are not re-exported and cannot interpose with a
-# host process's own copies (e.g. PyTorch's bundled LLVM). Exclude LLVM/zlib/zstd by name -- NOT
-# --exclude-libs,ALL, which would also hide the static libstdc++ symbols (operator new, __throw_*,
-# ...) that liborc_rt and JIT'd C++ code resolve from this .so at run time. The LLVM list is derived
-# from llvm-config so it tracks the toolchain version.
+# host process's own copies (e.g. PyTorch's bundled LLVM).
+#
+# DEMO: because libstdc++ is now DYNAMIC (see above), the clean `--exclude-libs,ALL` is safe: it
+# localizes every static archive (LLVM/zlib/zstd) while the C++ runtime the JIT needs is served by
+# the dynamic libstdc++.so, not by hidden archive symbols. This replaces the by-name exclude list
+# that the conda build required (where a static libstdc++ made ALL unusable).
 if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android|FreeBSD|NetBSD|OpenBSD" AND CMAKE_CXX_COMPILER_ID
                                                                          MATCHES "GNU|Clang"
 )
-  # --exclude-libs needs exact archive filenames (no globs), so turn each -lLLVM* from llvm-config
-  # into libLLVM*.a and add zlib/zstd. One colon-separated list -- a -Wl comma list would be split.
-  set(_exclude_archives ${_llvm_libs_list} "-lz" "-lzstd")
-  list(TRANSFORM _exclude_archives REPLACE "^-l(.+)$" "lib\\1.a")
-  list(JOIN _exclude_archives ":" _exclude_libs_arg)
-  target_link_options(tvm_ffi_orcjit PRIVATE "-Wl,--exclude-libs=${_exclude_libs_arg}")
+  target_link_options(tvm_ffi_orcjit PRIVATE "-Wl,--exclude-libs,ALL")
 endif ()
 
 # ---- Find and embed liborc_rt (Linux/ELF only) ----
@@ -184,7 +193,13 @@ if (NOT APPLE AND NOT WIN32)
   if (DEFINED ENV{ORC_RT_PATH})
     set(ORC_RT_PATH "$ENV{ORC_RT_PATH}")
   else ()
-    file(GLOB_RECURSE _orc_rt_candidates "${_llvm_prefix}/lib/clang/*/lib/liborc_rt*.a")
+    # DEMO: also search lib64 -- an el8 x86_64 RPM may place the clang resource dir under
+    # /usr/lib64/clang rather than /usr/lib/clang. GLOB_RECURSE descends into the lib/<triple>
+    # or lib/linux subdir where compiler-rt ships liborc_rt.
+    file(GLOB_RECURSE _orc_rt_candidates
+         "${_llvm_prefix}/lib/clang/*/lib/liborc_rt*.a"
+         "${_llvm_prefix}/lib64/clang/*/lib/liborc_rt*.a"
+    )
     if (_orc_rt_candidates)
       list(GET _orc_rt_candidates 0 ORC_RT_PATH)
     endif ()
