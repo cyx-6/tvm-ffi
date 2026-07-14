@@ -63,10 +63,12 @@ runs:
         CIBW_BUILD_VERBOSITY: 1
         CMAKE_BUILD_PARALLEL_LEVEL: ${{ steps.env_vars.outputs.cpu_count }}
         # DEMO: install LLVM 23-pre from the pinned big-merge snapshot inside the build container.
-        # copr's repo file targets rhel-8, which is exactly the manylinux_2_28 base (AlmaLinux 8).
+        # The copr plugin auto-detects manylinux_2_28 as chroot "epel-8", but the project only
+        # publishes "rhel-8" (ABI-identical to AlmaLinux 8 / manylinux_2_28), so force the chroot
+        # explicitly. $(arch) -> x86_64 | aarch64 covers both matrix legs with one line.
         CIBW_BEFORE_ALL_LINUX: >-
           dnf install -y 'dnf-command(copr)' &&
-          dnf copr enable -y @fedora-llvm-team/llvm-snapshots-big-merge-20260714 &&
+          dnf copr enable -y @fedora-llvm-team/llvm-snapshots-big-merge-20260714 rhel-8-$(arch) &&
           dnf install -y llvm-devel llvm-static clang compiler-rt libzstd-devel zlib-devel &&
           llvm-config --version
         # Build against the in-tree core (not PyPI) so the addon's tvm_ffi ABI
