@@ -19,11 +19,17 @@ name: Build LLVM (Linux, from source)
 description: >
   Build a minimal static LLVM + liborc_rt into /opt/llvm using the manylinux
   gcc-toolset, so every artifact stays under the manylinux GLIBCXX/CXXABI floor.
+  Runs on a HOST job and drives the build via `docker run` (not a job-level
+  container:), so /opt/llvm lands on the host and the caller's actions/cache save
+  is host-side -- which a later host job (orcjit) can actually restore.
   Runs only on a cache miss; the caller caches /opt/llvm by version + arch.
 
 inputs:
   llvm_version:
     description: "LLVM release (e.g. 22.1.0) -> checks out tag llvmorg-<version>"
+    required: true
+  manylinux_image:
+    description: "manylinux image providing gcc-toolset (arch-specific)"
     required: true
   zlib_version:
     description: "zlib release (tag v<version>)"
@@ -37,10 +43,8 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # LLVM sources (incl. compiler-rt) via checkout -- no download in the build.
-    # A blobless shallow checkout keeps the ~monorepo fetch cheap.
-    # clean: false on all three so a later checkout doesn't wipe the earlier one
-    # (they use distinct paths under the workspace).
+    # Sources via checkout on the HOST. github.workspace resolves normally here
+    # (no container mount remap). clean: false so each checkout keeps the others.
     - name: Check out llvm-project
       uses: actions/checkout@v5
       with:
@@ -69,37 +73,34 @@ runs:
         fetch-depth: 1
         clean: false
 
-    # cmake ships in the manylinux image; ninja does not. pipx drops shims in
-    # ~/.local/bin -- expose it to later steps via GITHUB_PATH.
-    - name: Ensure cmake + ninja
+    # Build inside the manylinux image via docker run, mounting the workspace
+    # (sources + scripts) and /opt/llvm (output). Files land on the host, so the
+    # caller's host-side cache save is restorable by the host-side orcjit job.
+    - name: Build LLVM + deps + orc_rt into /opt/llvm (docker)
       shell: bash
       run: |
         set -euo pipefail
-        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-        export PATH="$HOME/.local/bin:$PATH"
-        command -v cmake >/dev/null || pipx install cmake
-        command -v ninja >/dev/null || pipx install ninja
-        cmake --version | head -1
-        ninja --version
-
-    - name: Build LLVM + deps + orc_rt into /opt/llvm
-      shell: bash
-      env:
-        LLVM_PREFIX: /opt/llvm
-        LLVM_VERSION: ${{ inputs.llvm_version }}
-      run: |
-        set -euo pipefail
-        # In a container job the ${{ github.workspace }} EXPRESSION expands to the
-        # host path (/home/runner/work/...), but the runner sets $GITHUB_WORKSPACE
-        # and the step CWD to the in-container mount (/__w/...). Derive every path
-        # from $GITHUB_WORKSPACE so it resolves inside the container.
-        echo "[dbg] pwd=$(pwd) GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
-        ls -la "$GITHUB_WORKSPACE/.github/actions/build-llvm-linux" || true
-        export LLVM_SRC_DIR="$GITHUB_WORKSPACE/llvm-project"
-        export ZLIB_SRC_DIR="$GITHUB_WORKSPACE/zlib"
-        export ZSTD_SRC_DIR="$GITHUB_WORKSPACE/zstd"
-        d="$GITHUB_WORKSPACE/.github/actions/build-llvm-linux"
-        bash "$d/10-deps.sh"
-        bash "$d/20-llvm.sh"
-        bash "$d/30-orcrt.sh"
+        sudo mkdir -p /opt/llvm
+        docker run --rm \
+          -v "$GITHUB_WORKSPACE:/work" \
+          -v /opt/llvm:/opt/llvm \
+          -e LLVM_PREFIX=/opt/llvm \
+          -e LLVM_VERSION="${{ inputs.llvm_version }}" \
+          -e LLVM_SRC_DIR=/work/llvm-project \
+          -e ZLIB_SRC_DIR=/work/zlib \
+          -e ZSTD_SRC_DIR=/work/zstd \
+          -e BUILD=/tmp/llvm-build \
+          "${{ inputs.manylinux_image }}" \
+          bash -euo pipefail -c '
+            command -v ninja >/dev/null || pipx install ninja || pip install ninja
+            export PATH="$HOME/.local/bin:$PATH"
+            d=/work/.github/actions/build-llvm-linux
+            bash "$d/10-deps.sh"
+            bash "$d/20-llvm.sh"
+            bash "$d/30-orcrt.sh"
+          '
+        # docker wrote /opt/llvm as root; hand it to the runner user so
+        # actions/cache can read it and cibuildwheel can bind-mount it.
+        sudo chown -R "$(id -u):$(id -g)" /opt/llvm
         echo "LLVM prefix ready at /opt/llvm"
+        /opt/llvm/bin/llvm-config --version

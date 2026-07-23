@@ -210,9 +210,12 @@ jobs:
         run: |
           cargo test
 
-  # Stage 1: build LLVM from source into /opt/llvm inside the manylinux_2_28
-  # container (so gcc-toolset keeps the ABI under the floor) and cache it by
-  # version + platform. Runs only on a cache miss; ~45 min cold, skipped warm.
+  # Stage 1: build LLVM from source into /opt/llvm and cache it by version +
+  # platform. The job runs on the HOST (no container:); the build itself happens
+  # inside the manylinux_2_28 image via `docker run` (see the action), so
+  # gcc-toolset keeps the ABI under the floor AND the cache save is host-side --
+  # which the host-side orcjit job can restore (a container-side save cannot).
+  # Runs only on a cache miss; ~45 min cold, skipped warm.
   build_llvm:
     needs: [lint, prepare]
     if: >
@@ -221,7 +224,6 @@ jobs:
       needs.prepare.outputs.should_skip_ci_docs_only != 'true'
     name: build llvm ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
-    container: quay.io/pypa/manylinux_2_28_${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
@@ -247,6 +249,7 @@ jobs:
         uses: ./.github/actions/build-llvm-linux
         with:
           llvm_version: ${{ env.LLVM_VERSION }}
+          manylinux_image: quay.io/pypa/manylinux_2_28_${{ matrix.arch }}
 
   # Stage 2: build + test the orcjit wheel. On Linux it consumes the cached LLVM
   # from build_llvm; macOS/Windows install LLVM via conda inside the action.
