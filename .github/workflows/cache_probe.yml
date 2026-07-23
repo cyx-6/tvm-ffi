@@ -15,9 +15,9 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# Fast probe (no LLVM build) to learn how actions/cache and artifacts behave
-# across the container(save) -> host/container(restore) boundary. Uses a dummy
-# /opt/llvm marker so each run is ~1-2 min. Delete once the handoff is settled.
+# Fast probe (no LLVM build): does building via `docker run` on a HOST job (so
+# the cache SAVE is host-side) let a later HOST job restore it? That sidesteps
+# the container->host cache miss found earlier. Dummy marker -> ~1 min/run.
 name: cache probe
 
 on:
@@ -31,76 +31,50 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  KEY: probe-opt-llvm-v1
+  KEY: probe-hostdocker-v1
+  IMAGE: quay.io/pypa/manylinux_2_28_aarch64
 
 jobs:
-  # Producer, in the SAME kind of container build_llvm uses.
-  save_in_container:
-    name: save (container)
+  # Producer on the HOST (no container:). Build the dummy prefix by running the
+  # manylinux image via `docker run` with a bind mount, so files land on the
+  # host and the cache save below is host-side.
+  save_host_docker:
+    name: save (host+docker)
     runs-on: ubuntu-24.04-arm
-    container: quay.io/pypa/manylinux_2_28_aarch64
     steps:
-      - name: Make dummy /opt/llvm
-        run: |
-          mkdir -p /opt/llvm/bin
-          echo "dummy llvm-config $(date -u +%FT%TZ)" > /opt/llvm/bin/llvm-config
-          echo "MARKER=probe" > /opt/llvm/marker.txt
-          ls -la /opt/llvm /opt/llvm/bin
+      - name: docker available on host?
+        run: docker --version
 
-      - name: Save cache (from container)
+      - name: Build dummy /opt/llvm via docker run
+        run: |
+          docker run --rm -v /opt/llvm:/opt/llvm "$IMAGE" bash -c '
+            mkdir -p /opt/llvm/bin
+            echo "dummy llvm-config" > /opt/llvm/bin/llvm-config
+            chmod +x /opt/llvm/bin/llvm-config
+            echo "MARKER=hostdocker" > /opt/llvm/marker.txt
+            echo "built by: $(gcc --version | head -1 || echo no-gcc)"
+          '
+      - name: Inspect on host (ownership / readability)
+        run: |
+          id
+          ls -la /opt/llvm /opt/llvm/bin
+          cat /opt/llvm/marker.txt
+          # can the runner user (non-root) read it for tar? test explicit read:
+          cat /opt/llvm/bin/llvm-config >/dev/null && echo "runner CAN read root-owned files" || echo "runner CANNOT read"
+
+      - name: Save cache (HOST-side)
         uses: actions/cache/save@v4
         with:
           path: /opt/llvm
           key: ${{ env.KEY }}
 
-      - name: Package + upload artifact (control)
-        run: tar -C /opt -cf /tmp/opt-llvm.tar llvm
-      - uses: actions/upload-artifact@v4
-        with:
-          name: opt-llvm-tar
-          path: /tmp/opt-llvm.tar
-          retention-days: 1
-
-  # Consumer #1: bare HOST runner (like the orcjit job). This is the combo that
-  # failed. Report cache hit/miss AND whether the artifact path works.
+  # Consumer on the HOST, like the real orcjit job. Expect a HIT now.
   restore_on_host:
     name: restore (host)
-    needs: [save_in_container]
+    needs: [save_host_docker]
     runs-on: ubuntu-24.04-arm
     steps:
-      - name: Restore cache (on host)
-        id: c
-        uses: actions/cache/restore@v4
-        with:
-          path: /opt/llvm
-          key: ${{ env.KEY }}
-
-      - name: Report cache result
-        run: |
-          echo "cache-hit=${{ steps.c.outputs.cache-hit }}"
-          echo "cache-matched-key=${{ steps.c.outputs.cache-matched-key }}"
-          if [ -f /opt/llvm/marker.txt ]; then echo "CACHE OK:"; cat /opt/llvm/marker.txt; else echo "CACHE MISS: /opt/llvm absent"; fi
-
-      - name: Restore via artifact (control)
-        uses: actions/download-artifact@v4
-        with:
-          name: opt-llvm-tar
-          path: /tmp/art
-      - name: Report artifact result
-        run: |
-          sudo tar -C /opt -xf /tmp/art/opt-llvm.tar
-          if [ -f /opt/llvm/marker.txt ]; then echo "ARTIFACT OK:"; cat /opt/llvm/marker.txt; else echo "ARTIFACT FAIL"; fi
-
-  # Consumer #2: SAME container kind as producer. Isolates whether the boundary
-  # (not the cache itself) is the problem: if this hits but host misses, it's the
-  # container<->host split.
-  restore_in_container:
-    name: restore (container)
-    needs: [save_in_container]
-    runs-on: ubuntu-24.04-arm
-    container: quay.io/pypa/manylinux_2_28_aarch64
-    steps:
-      - name: Restore cache (in container)
+      - name: Restore cache (host)
         id: c
         uses: actions/cache/restore@v4
         with:
@@ -109,4 +83,8 @@ jobs:
       - name: Report
         run: |
           echo "cache-hit=${{ steps.c.outputs.cache-hit }}"
-          if [ -f /opt/llvm/marker.txt ]; then echo "CACHE OK:"; cat /opt/llvm/marker.txt; else echo "CACHE MISS: /opt/llvm absent"; fi
+          if [ -f /opt/llvm/marker.txt ]; then
+            echo "HOST RESTORE OK:"; cat /opt/llvm/marker.txt; ls -la /opt/llvm/bin
+          else
+            echo "HOST RESTORE MISS: /opt/llvm absent"
+          fi
