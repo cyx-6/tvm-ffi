@@ -1,0 +1,112 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Fast probe (no LLVM build) to learn how actions/cache and artifacts behave
+# across the container(save) -> host/container(restore) boundary. Uses a dummy
+# /opt/llvm marker so each run is ~1-2 min. Delete once the handoff is settled.
+name: cache probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/llvm-from-source
+
+concurrency:
+  group: cache-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KEY: probe-opt-llvm-v1
+
+jobs:
+  # Producer, in the SAME kind of container build_llvm uses.
+  save_in_container:
+    name: save (container)
+    runs-on: ubuntu-24.04-arm
+    container: quay.io/pypa/manylinux_2_28_aarch64
+    steps:
+      - name: Make dummy /opt/llvm
+        run: |
+          mkdir -p /opt/llvm/bin
+          echo "dummy llvm-config $(date -u +%FT%TZ)" > /opt/llvm/bin/llvm-config
+          echo "MARKER=probe" > /opt/llvm/marker.txt
+          ls -la /opt/llvm /opt/llvm/bin
+
+      - name: Save cache (from container)
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/llvm
+          key: ${{ env.KEY }}
+
+      - name: Package + upload artifact (control)
+        run: tar -C /opt -cf /tmp/opt-llvm.tar llvm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opt-llvm-tar
+          path: /tmp/opt-llvm.tar
+          retention-days: 1
+
+  # Consumer #1: bare HOST runner (like the orcjit job). This is the combo that
+  # failed. Report cache hit/miss AND whether the artifact path works.
+  restore_on_host:
+    name: restore (host)
+    needs: [save_in_container]
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Restore cache (on host)
+        id: c
+        uses: actions/cache/restore@v4
+        with:
+          path: /opt/llvm
+          key: ${{ env.KEY }}
+
+      - name: Report cache result
+        run: |
+          echo "cache-hit=${{ steps.c.outputs.cache-hit }}"
+          echo "cache-matched-key=${{ steps.c.outputs.cache-matched-key }}"
+          if [ -f /opt/llvm/marker.txt ]; then echo "CACHE OK:"; cat /opt/llvm/marker.txt; else echo "CACHE MISS: /opt/llvm absent"; fi
+
+      - name: Restore via artifact (control)
+        uses: actions/download-artifact@v4
+        with:
+          name: opt-llvm-tar
+          path: /tmp/art
+      - name: Report artifact result
+        run: |
+          sudo tar -C /opt -xf /tmp/art/opt-llvm.tar
+          if [ -f /opt/llvm/marker.txt ]; then echo "ARTIFACT OK:"; cat /opt/llvm/marker.txt; else echo "ARTIFACT FAIL"; fi
+
+  # Consumer #2: SAME container kind as producer. Isolates whether the boundary
+  # (not the cache itself) is the problem: if this hits but host misses, it's the
+  # container<->host split.
+  restore_in_container:
+    name: restore (container)
+    needs: [save_in_container]
+    runs-on: ubuntu-24.04-arm
+    container: quay.io/pypa/manylinux_2_28_aarch64
+    steps:
+      - name: Restore cache (in container)
+        id: c
+        uses: actions/cache/restore@v4
+        with:
+          path: /opt/llvm
+          key: ${{ env.KEY }}
+      - name: Report
+        run: |
+          echo "cache-hit=${{ steps.c.outputs.cache-hit }}"
+          if [ -f /opt/llvm/marker.txt ]; then echo "CACHE OK:"; cat /opt/llvm/marker.txt; else echo "CACHE MISS: /opt/llvm absent"; fi
