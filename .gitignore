@@ -124,6 +124,8 @@ celerybeat-schedule
 !.github/actions/build-wheel-for-publish/action.yml
 !.github/actions/build-orcjit-wheel/
 !.github/actions/build-orcjit-wheel/action.yml
+!.github/actions/build-llvm-linux/
+!.github/actions/build-llvm-linux/*
 celerybeat.pid
 
 # SageMath parsed files
