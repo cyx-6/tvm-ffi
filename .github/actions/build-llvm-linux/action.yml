@@ -37,16 +37,10 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # Stage this action's scripts to runner.temp BEFORE any checkout, so they
-    # survive regardless of how the source checkouts churn the workspace.
-    - name: Stage build scripts
-      shell: bash
-      run: cp "${{ github.action_path }}"/*.sh "${{ runner.temp }}/"
-
     # LLVM sources (incl. compiler-rt) via checkout -- no download in the build.
     # A blobless shallow checkout keeps the ~monorepo fetch cheap.
-    # clean: false on all three -- otherwise checkout wipes the workspace before
-    # placing each repo, deleting this action's own scripts (github.action_path).
+    # clean: false on all three so a later checkout doesn't wipe the earlier one
+    # (they use distinct paths under the workspace).
     - name: Check out llvm-project
       uses: actions/checkout@v5
       with:
@@ -98,7 +92,10 @@ runs:
         ZSTD_SRC_DIR: ${{ github.workspace }}/zstd
       run: |
         set -euo pipefail
-        d="${{ runner.temp }}"
+        # Use github.workspace (not github.action_path): for a local action in a
+        # container job, action_path keeps the host prefix (/home/runner/work),
+        # while the workspace is mounted at /__w. workspace maps correctly.
+        d="${{ github.workspace }}/.github/actions/build-llvm-linux"
         bash "$d/10-deps.sh"
         bash "$d/20-llvm.sh"
         bash "$d/30-orcrt.sh"
