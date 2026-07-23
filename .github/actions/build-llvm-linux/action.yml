@@ -37,8 +37,16 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # Stage this action's scripts to runner.temp BEFORE any checkout, so they
+    # survive regardless of how the source checkouts churn the workspace.
+    - name: Stage build scripts
+      shell: bash
+      run: cp "${{ github.action_path }}"/*.sh "${{ runner.temp }}/"
+
     # LLVM sources (incl. compiler-rt) via checkout -- no download in the build.
     # A blobless shallow checkout keeps the ~monorepo fetch cheap.
+    # clean: false on all three -- otherwise checkout wipes the workspace before
+    # placing each repo, deleting this action's own scripts (github.action_path).
     - name: Check out llvm-project
       uses: actions/checkout@v5
       with:
@@ -47,6 +55,7 @@ runs:
         path: llvm-project
         fetch-depth: 1
         filter: blob:none
+        clean: false
 
     - name: Check out zlib
       uses: actions/checkout@v5
@@ -55,6 +64,7 @@ runs:
         ref: v${{ inputs.zlib_version }}
         path: zlib
         fetch-depth: 1
+        clean: false
 
     - name: Check out zstd
       uses: actions/checkout@v5
@@ -63,6 +73,7 @@ runs:
         ref: v${{ inputs.zstd_version }}
         path: zstd
         fetch-depth: 1
+        clean: false
 
     # cmake ships in the manylinux image; ninja does not. pipx drops shims in
     # ~/.local/bin -- expose it to later steps via GITHUB_PATH.
@@ -87,7 +98,7 @@ runs:
         ZSTD_SRC_DIR: ${{ github.workspace }}/zstd
       run: |
         set -euo pipefail
-        d="${{ github.action_path }}"
+        d="${{ runner.temp }}"
         bash "$d/10-deps.sh"
         bash "$d/20-llvm.sh"
         bash "$d/30-orcrt.sh"
