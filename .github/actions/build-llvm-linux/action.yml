@@ -87,15 +87,18 @@ runs:
       env:
         LLVM_PREFIX: /opt/llvm
         LLVM_VERSION: ${{ inputs.llvm_version }}
-        LLVM_SRC_DIR: ${{ github.workspace }}/llvm-project
-        ZLIB_SRC_DIR: ${{ github.workspace }}/zlib
-        ZSTD_SRC_DIR: ${{ github.workspace }}/zstd
       run: |
         set -euo pipefail
-        # Use github.workspace (not github.action_path): for a local action in a
-        # container job, action_path keeps the host prefix (/home/runner/work),
-        # while the workspace is mounted at /__w. workspace maps correctly.
-        d="${{ github.workspace }}/.github/actions/build-llvm-linux"
+        # In a container job the ${{ github.workspace }} EXPRESSION expands to the
+        # host path (/home/runner/work/...), but the runner sets $GITHUB_WORKSPACE
+        # and the step CWD to the in-container mount (/__w/...). Derive every path
+        # from $GITHUB_WORKSPACE so it resolves inside the container.
+        echo "[dbg] pwd=$(pwd) GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+        ls -la "$GITHUB_WORKSPACE/.github/actions/build-llvm-linux" || true
+        export LLVM_SRC_DIR="$GITHUB_WORKSPACE/llvm-project"
+        export ZLIB_SRC_DIR="$GITHUB_WORKSPACE/zlib"
+        export ZSTD_SRC_DIR="$GITHUB_WORKSPACE/zstd"
+        d="$GITHUB_WORKSPACE/.github/actions/build-llvm-linux"
         bash "$d/10-deps.sh"
         bash "$d/20-llvm.sh"
         bash "$d/30-orcrt.sh"
