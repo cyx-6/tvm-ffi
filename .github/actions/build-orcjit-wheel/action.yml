@@ -31,8 +31,15 @@ inputs:
     description: "Branch, tag, or SHA to check out before building"
     required: true
   llvm_version:
-    description: "LLVM version (must match the build_llvm job / cache key)"
+    description: "LLVM version (selects the release tag / conda pin)"
     default: "22.1.0"
+    required: false
+  llvm_release_repo:
+    description: >
+      GitHub repo hosting the prebuilt LLVM release assets (Linux only). The
+      asset llvm-<version>-linux-<arch>.tar.zst is downloaded from the
+      llvm-<version> tag. Point at a fork to validate before the canonical repo.
+    default: "mlc-ai/package"
     required: false
 
 runs:
@@ -48,23 +55,37 @@ runs:
       id: env_vars
 
     # ---- Acquire LLVM prefix ----
-    # Linux: restored from the cache populated by the build_llvm job (built from
-    #   source with the manylinux gcc-toolset so the ABI stays under the floor).
-    #   That job is a hard dependency, so on Linux this is always a cache hit.
-    # macOS/Windows: no GLIBCXX floor -- keep the conda-forge binaries.
-    - name: Cache LLVM
+    # Linux: downloaded as a prebuilt tarball from a GitHub Release (built from
+    #   source with the manylinux gcc-toolset so the ABI stays under the floor)
+    #   and extracted to /opt/llvm. Permanent storage -- no actions/cache lifetime.
+    # macOS/Windows: no GLIBCXX floor -- keep the conda-forge binaries, cached.
+    - name: Cache LLVM (macOS/Windows)
+      if: runner.os != 'Linux'
       uses: actions/cache@v4
       id: llvm-cache
       with:
         path: ${{ runner.os == 'Windows' && 'C:/opt/llvm' || '/opt/llvm' }}
         key: llvm-${{ inputs.llvm_version }}-${{ runner.os }}-${{ inputs.arch }}-v4
 
-    - name: Verify LLVM cache (Linux)
+    - name: Download prebuilt LLVM (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        asset="llvm-${{ inputs.llvm_version }}-linux-${{ inputs.arch }}.tar.zst"
+        url="https://github.com/${{ inputs.llvm_release_repo }}/releases/download/llvm-${{ inputs.llvm_version }}/${asset}"
+        echo "Downloading $url"
+        curl -fL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/$asset" "$url"
+        sudo mkdir -p /opt/llvm
+        sudo tar --zstd -xf "$RUNNER_TEMP/$asset" -C /opt/llvm
+        sudo chown -R "$(id -u):$(id -g)" /opt/llvm
+
+    - name: Verify LLVM prefix (Linux)
       if: runner.os == 'Linux'
       shell: bash
       run: |
         test -x /opt/llvm/bin/llvm-config \
-          || { echo "::error::Linux LLVM cache miss; the build_llvm job must run first"; exit 1; }
+          || { echo "::error::LLVM prefix missing; the release download must succeed first"; exit 1; }
         /opt/llvm/bin/llvm-config --version
 
     # ---- Install LLVM via conda (macOS/Windows, cache miss only) ----
@@ -114,8 +135,8 @@ runs:
         CIBW_ARCHS_LINUX: ${{ inputs.arch }}
         CIBW_ARCHS_MACOS: ${{ inputs.arch }}
         CIBW_ARCHS_WINDOWS: ${{ inputs.arch }}
-        # Link inside manylinux_2_28 -- the same image family the cached LLVM was
-        # built in (gcc-toolset-14). An older image couldn't consume its libs.
+        # Link inside manylinux_2_28 -- the same image family the downloaded LLVM
+        # was built in (gcc-toolset-14). An older image couldn't consume its libs.
         CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
         CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
         CIBW_BUILD_VERBOSITY: 1

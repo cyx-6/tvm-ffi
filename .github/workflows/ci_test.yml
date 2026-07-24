@@ -59,8 +59,7 @@ jobs:
         id: orcjit_files
         run: |
           FILES=$(git diff --name-only --diff-filter=ACMR origin/${{ github.base_ref }}...HEAD -- \
-            addons/tvm_ffi_orcjit/ .github/actions/build-orcjit-wheel/ \
-            .github/actions/build-llvm-linux/ | tr '\n' ' ')
+            addons/tvm_ffi_orcjit/ .github/actions/build-orcjit-wheel/ | tr '\n' ' ')
           echo "files=$FILES" >> $GITHUB_OUTPUT
           [ -n "$FILES" ] && echo "changed=true" >> $GITHUB_OUTPUT || echo "changed=false" >> $GITHUB_OUTPUT
 
@@ -210,57 +209,24 @@ jobs:
         run: |
           cargo test
 
-  # Stage 1: build LLVM from source into /opt/llvm and cache it by version +
-  # platform. The job runs on the HOST (no container:); the build itself happens
-  # inside the manylinux_2_28 image via `docker run` (see the action), so
-  # gcc-toolset keeps the ABI under the floor AND the cache save is host-side --
-  # which the host-side orcjit job can restore (a container-side save cannot).
-  # Runs only on a cache miss; ~45 min cold, skipped warm.
-  build_llvm:
-    needs: [lint, prepare]
-    if: >
-      needs.prepare.outputs.orcjit_changed == 'true' &&
-      needs.prepare.outputs.should_skip_ci_commit != 'true' &&
-      needs.prepare.outputs.should_skip_ci_docs_only != 'true'
-    name: build llvm ${{ matrix.arch }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {os: ubuntu-latest, arch: x86_64}
-          - {os: ubuntu-24.04-arm, arch: aarch64}
-    env:
-      LLVM_VERSION: "22.1.0"
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 1
-
-      - name: Cache LLVM
-        uses: actions/cache@v4
-        id: llvm-cache
-        with:
-          path: /opt/llvm
-          key: llvm-${{ env.LLVM_VERSION }}-Linux-${{ matrix.arch }}-v4
-
-      - name: Build LLVM from source
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        uses: ./.github/actions/build-llvm-linux
-        with:
-          llvm_version: ${{ env.LLVM_VERSION }}
-          manylinux_image: quay.io/pypa/manylinux_2_28_${{ matrix.arch }}
-
-  # Stage 2: build + test the orcjit wheel. On Linux it consumes the cached LLVM
-  # from build_llvm; macOS/Windows install LLVM via conda inside the action.
+  # Build + test the orcjit wheel. On Linux the action downloads a prebuilt LLVM
+  # tarball from a GitHub Release (built from source under the manylinux
+  # gcc-toolset so the ABI stays under the floor); macOS/Windows install LLVM via
+  # conda inside the action. The LLVM release is produced out-of-band (rarely, on
+  # version bump) by mlc-ai/package's build_llvm workflow -- not on every CI run.
   orcjit:
-    needs: [lint, prepare, build_llvm]
+    needs: [lint, prepare]
     if: >
       needs.prepare.outputs.orcjit_changed == 'true' &&
       needs.prepare.outputs.should_skip_ci_commit != 'true' &&
       needs.prepare.outputs.should_skip_ci_docs_only != 'true'
     name: orcjit ${{ matrix.os }} (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
+    env:
+      LLVM_VERSION: "22.1.0"
+      # Repo hosting the prebuilt LLVM release assets (Linux). Point at a fork to
+      # validate a new build before flipping to the canonical mlc-ai/package.
+      LLVM_RELEASE_REPO: "mlc-ai/package"
     strategy:
       fail-fast: false
       matrix:
@@ -281,7 +247,8 @@ jobs:
           arch: ${{ matrix.arch }}
           build: ${{ matrix.build }}
           checkout_ref: ${{ github.sha }}
-          llvm_version: "22.1.0"
+          llvm_version: ${{ env.LLVM_VERSION }}
+          llvm_release_repo: ${{ env.LLVM_RELEASE_REPO }}
 
       - uses: actions/upload-artifact@v4
         with:
