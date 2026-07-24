@@ -162,9 +162,12 @@ mkdir -p "$dest" && cp -a "$built" "$dest/"
 echo "[orcrt] placed $dest/$(basename "$built")"
 
 # ---- pack: archive the prefix CONTENTS at top level ----
-# Consumer extracts with `tar -C /opt/llvm`, no --strip-components.
+# Consumer extracts with `tar --zstd -xf -C /opt/llvm`, no --strip-components.
+# The manylinux image's GNU tar predates the `tar --zstd` filter, so pipe through
+# the zstd CLI (installed if absent) instead of relying on tar's built-in flag.
+command -v zstd >/dev/null || dnf install -y zstd || yum install -y zstd
 mkdir -p "$(dirname "$OUT")"
-echo "[pack] $OUT (zstd -19)"
-ZSTD_CLEVEL="${ZSTD_CLEVEL:-19}" tar --zstd -cf "$OUT" -C "$PREFIX" .
+echo "[pack] $OUT (zstd -${ZSTD_CLEVEL:-19})"
+tar -cf - -C "$PREFIX" . | zstd -T0 "-${ZSTD_CLEVEL:-19}" -f -o "$OUT"
 ls -l "$OUT"
 echo "[done] wrote $OUT"
