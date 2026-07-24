@@ -1,0 +1,135 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# VALIDATION ONLY -- fork-side mirror of mlc-ai/package's build_llvm workflow.
+# Runs the real from-source LLVM build (scripts/build_llvm_manylinux.sh, staged
+# here under .github/validate/) and publishes the tarball to THIS repo's own
+# Releases via the default GITHUB_TOKEN, so the orcjit CI can be pointed at the
+# fork (llvm_release_repo = <this repo>) and exercised end-to-end before the real
+# producer lands in mlc-ai/package. Not for apache; delete before landing.
+name: validate build llvm
+
+on:
+  push:
+    branches:
+      - ci/build-llvm-validate
+  workflow_dispatch:
+    inputs:
+      llvm_version:
+        description: LLVM release (tag llvmorg-<version>)
+        required: true
+        default: "22.1.0"
+
+permissions:
+  contents: write
+
+env:
+  LLVM_VERSION: "22.1.0"
+
+jobs:
+  build_llvm:
+    name: LLVM ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, arch: x86_64}
+          - {os: ubuntu-24.04-arm, arch: aarch64}
+    steps:
+      - name: Check out this repo (for the build script)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          path: repo
+          clean: false
+
+      - name: Check out llvm-project
+        uses: actions/checkout@v5
+        with:
+          repository: llvm/llvm-project
+          ref: llvmorg-${{ env.LLVM_VERSION }}
+          path: llvm-project
+          fetch-depth: 1
+          filter: blob:none
+          clean: false
+
+      - name: Check out zlib
+        uses: actions/checkout@v5
+        with:
+          repository: madler/zlib
+          ref: v1.3.1
+          path: zlib
+          fetch-depth: 1
+          clean: false
+
+      - name: Check out zstd
+        uses: actions/checkout@v5
+        with:
+          repository: facebook/zstd
+          ref: v1.5.6
+          path: zstd
+          fetch-depth: 1
+          clean: false
+
+      - name: Build LLVM into a tarball (docker)
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="llvm-${LLVM_VERSION}-linux-${{ matrix.arch }}.tar.zst"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            "quay.io/pypa/manylinux_2_28_${{ matrix.arch }}" \
+            bash /work/repo/.github/validate/build_llvm_manylinux.sh \
+              --arch "${{ matrix.arch }}" \
+              --llvm-version "${LLVM_VERSION}" \
+              --llvm-src /work/llvm-project \
+              --zlib-src /work/zlib \
+              --zstd-src /work/zstd \
+              --prefix /opt/llvm \
+              --out "/work/out/$out"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/out"
+          ls -l "$GITHUB_WORKSPACE/out/$out"
+          echo "LLVM_TARBALL=out/$out" >> "$GITHUB_ENV"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-${{ env.LLVM_VERSION }}-linux-${{ matrix.arch }}
+          path: ${{ env.LLVM_TARBALL }}
+          if-no-files-found: error
+
+  # Single publish job so the two parallel builds never race on creating the tag.
+  publish:
+    needs: [build_llvm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download tarball artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: llvm-${{ env.LLVM_VERSION }}-linux-*
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - name: Publish to Release (this repo)
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: llvm-${{ env.LLVM_VERSION }}
+          prerelease: true
+          files: dist/*.tar.zst
