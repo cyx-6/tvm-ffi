@@ -1,0 +1,142 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# THROWAWAY PROBE -- not part of the shipped CI. Validates the LLVM
+# release-artifact round-trip end to end with DUMMY files (no real ~50m build),
+# de-risking the exact plumbing that churned in the from-source PR:
+#   produce: fabricate a dummy /opt/llvm prefix -> tar+zstd -> upload as a
+#            GitHub Release asset via the workflow token (tag llvm-0.0.0-dummy).
+#   consume: download that asset by plain URL -> extract to the host /opt/llvm ->
+#            bind-mount into the manylinux_2_28 container and assert the prefix
+#            layout the orcjit wheel build depends on (llvm-config + orc_rt glob).
+# Run manually in the fork; delete before landing. Mirrors build_llvm.yaml's
+# structure so a green run means the real producer/consumer contract holds.
+name: probe llvm release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  LLVM_VERSION: "22.1.0"
+  DUMMY_TAG: "llvm-0.0.0-dummy"
+
+jobs:
+  produce:
+    name: produce ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    # Serialize the two legs: the first creates the release+tag, the second just
+    # adds its asset. Avoids the concurrent release-creation race in softprops.
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - {os: ubuntu-latest, arch: x86_64}
+          - {os: ubuntu-24.04-arm, arch: aarch64}
+    steps:
+      - name: Fabricate a dummy LLVM prefix + tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TEMP/llvm-prefix"
+          major="${LLVM_VERSION%%.*}"
+          mkdir -p "$prefix/bin" "$prefix/include" \
+                   "$prefix/lib/cmake/llvm" \
+                   "$prefix/lib/clang/$major/lib/linux"
+
+          # llvm-config stub: the consumer only calls `--version`; make it echo
+          # the version and be executable (mode survives tar -> extract -> exec).
+          cat > "$prefix/bin/llvm-config" <<EOF
+          #!/bin/sh
+          echo "$LLVM_VERSION"
+          EOF
+          chmod +x "$prefix/bin/llvm-config"
+
+          # A few KB of dummy archives standing in for the real static libs and
+          # the CMake package config the orcjit build reads from the prefix.
+          for f in libLLVMCore.a libLLVMOrcJIT.a libLLVMSupport.a libz.a libzstd.a; do
+            head -c 4096 /dev/urandom > "$prefix/lib/$f"
+          done
+          echo "# dummy" > "$prefix/lib/cmake/llvm/LLVMConfig.cmake"
+          head -c 4096 /dev/urandom > "$prefix/lib/clang/$major/lib/linux/liborc_rt.a"
+
+          # Archive the prefix CONTENTS at top level (consumer extracts with
+          # -C /opt/llvm, no --strip-components).
+          out="$RUNNER_TEMP/llvm-${LLVM_VERSION}-linux-${{ matrix.arch }}.tar.zst"
+          tar --zstd -cf "$out" -C "$prefix" .
+          ls -l "$out"
+          echo "DUMMY_TARBALL=$out" >> "$GITHUB_ENV"
+
+      - name: Upload dummy tarball to the release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.DUMMY_TAG }}
+          prerelease: true
+          files: ${{ env.DUMMY_TARBALL }}
+
+  consume:
+    name: consume ${{ matrix.arch }}
+    needs: produce
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, arch: x86_64}
+          - {os: ubuntu-24.04-arm, arch: aarch64}
+    steps:
+      - name: Download the release asset by URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="llvm-${LLVM_VERSION}-linux-${{ matrix.arch }}.tar.zst"
+          url="https://github.com/${{ github.repository }}/releases/download/${DUMMY_TAG}/${asset}"
+          echo "Downloading $url"
+          curl -fL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/$asset" "$url"
+          ls -l "$RUNNER_TEMP/$asset"
+          echo "ASSET=$RUNNER_TEMP/$asset" >> "$GITHUB_ENV"
+
+      - name: Extract to host /opt/llvm
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/llvm
+          sudo tar --zstd -xf "$ASSET" -C /opt/llvm
+          sudo chown -R "$(id -u):$(id -g)" /opt/llvm
+          find /opt/llvm -maxdepth 3 -type f | sort
+
+      - name: Verify prefix inside the manylinux container (bind-mounted)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /opt/llvm:/opt/llvm \
+            "quay.io/pypa/manylinux_2_28_${{ matrix.arch }}" \
+            bash -euo pipefail -c '
+              test -x /opt/llvm/bin/llvm-config
+              echo "llvm-config --version -> $(/opt/llvm/bin/llvm-config --version)"
+              test -f /opt/llvm/lib/libz.a
+              test -f /opt/llvm/lib/libzstd.a
+              test -f /opt/llvm/lib/cmake/llvm/LLVMConfig.cmake
+              orc_rt="$(find /opt/llvm/lib/clang -name "liborc_rt*.a" | head -1)"
+              test -n "$orc_rt" || { echo "::error::orc_rt glob did not resolve"; exit 1; }
+              echo "orc_rt glob resolved -> $orc_rt"
+              echo "PROBE OK for ${{ matrix.arch }}"
+            '
