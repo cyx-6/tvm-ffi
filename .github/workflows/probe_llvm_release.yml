@@ -29,6 +29,9 @@ name: probe llvm release
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - ci/probe-llvm-release
 
 permissions:
   contents: write
