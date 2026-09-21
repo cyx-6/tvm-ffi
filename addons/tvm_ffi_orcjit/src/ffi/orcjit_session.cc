@@ -38,6 +38,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
 
 #include "orcjit_dylib.h"
@@ -213,15 +214,20 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const Optional<Variant<Stri
     // materialize liborc_rt while LLJITBuilder::create() is still running.
     builder.setProcessSymbolsJITDylibSetup(
         [](llvm::orc::LLJIT& J) -> llvm::Expected<llvm::orc::JITDylibSP> {
+          std::fprintf(stderr, "orcjit debug: process symbols setup start\n");
           auto& JD = J.getExecutionSession().createBareJITDylib("<Process Symbols>");
           auto process_generator = llvm::orc::EPCDynamicLibrarySearchGenerator::GetForTargetProcess(
               J.getExecutionSession());
           if (!process_generator) return process_generator.takeError();
           JD.addGenerator(std::move(*process_generator));
 
-          if (auto err = J.linkStaticLibraryInto(JD, GetEmbeddedLibStdCxxNonsharedBuffer())) {
+          auto archive = GetEmbeddedLibStdCxxNonsharedBuffer();
+          std::fprintf(stderr, "orcjit debug: nonshared archive size = %zu\n",
+                       archive->getBufferSize());
+          if (auto err = J.linkStaticLibraryInto(JD, std::move(archive))) {
             return std::move(err);
           }
+          std::fprintf(stderr, "orcjit debug: process symbols setup complete\n");
           return &JD;
         });
 #elif defined(_WIN32)
@@ -250,7 +256,9 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const Optional<Variant<Stri
   // tradeoff: no C++ exception unwinding across JIT frames on macOS.
   SetUpOrcPlatform(builder, orc_rt);
   setup_builder(builder);
+  std::fprintf(stderr, "orcjit debug: builder create start\n");
   jit_ = TVM_FFI_ORCJIT_LLVM_CALL(builder.create());
+  std::fprintf(stderr, "orcjit debug: builder create complete\n");
 #ifdef _WIN32
   // Strip .pdata/.xdata relocations from COFF objects before JITLink graph
   // building.  See llvm_patches/win_coff_pdata_strip.h for the rationale.
