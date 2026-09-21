@@ -102,6 +102,12 @@ The `LLVM_PREFIX` environment variable tells CMake where to find LLVM. If
 LLVM is installed in a conda env or a standard system path, CMake can
 auto-discover it and `LLVM_PREFIX` is not needed.
 
+On Linux, CMake also asks the configured C++ compiler for
+`libstdc++_nonshared.a`. If the toolchain provides it, the archive is embedded
+for private ORC symbol resolution; end users do not need the compiler or the
+archive at runtime. Unusual toolchains can override discovery with
+`-DLIBSTDCXX_NONSHARED_PATH=/path/to/libstdc++_nonshared.a`.
+
 ## Usage
 
 ### Basic Example

@@ -377,11 +377,7 @@ static void RegisterOrcJITFunctions() {
            });
 }
 
-TVM_FFI_STATIC_INIT_BLOCK() {
-  // This block may not execute when loaded via dlopen on some platforms.
-  // Call TVMFFIOrcJITInitialize() explicitly if functions are not registered.
-  RegisterOrcJITFunctions();
-}
+TVM_FFI_STATIC_INIT_BLOCK() { RegisterOrcJITFunctions(); }
 
 }  // namespace orcjit
 }  // namespace ffi

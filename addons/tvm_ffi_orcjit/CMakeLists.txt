@@ -155,22 +155,22 @@ endif ()
 # manylinux ABI floor and no too-recent GLIBCXX_* symbol is imported -- the -static-libstdc++
 # workaround the older conda-forge LLVM required is no longer needed.
 
-# Hide symbols pulled from static archives so they are not re-exported and cannot interpose with a
-# host process's own copies (e.g. PyTorch's bundled LLVM). Exclude LLVM/zlib/zstd by name -- NOT
-# --exclude-libs,ALL. The embedded liborc_rt.a is linked by the JIT at run time and resolves its C++
-# runtime through the process (dlsym), including archive-only helpers such as
-# _ZSt28__throw_bad_array_new_lengthv that libstdc++.so does not export; ALL localizes those and the
-# ORC platform then fails to materialize. This holds whether libstdc++ is static or dynamic. The
-# LLVM list is derived from llvm-config so it tracks the toolchain version.
+# Export only the explicit initialization API. In particular, do not publish symbols from the
+# statically linked LLVM/zlib/zstd archives: the addon is loaded into host processes that may carry
+# a different LLVM, and interposition between those copies is unsafe. On ELF, --exclude-libs,ALL
+# also gives archive members local binding before the version script trims the dynamic symbol table.
 if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android|FreeBSD|NetBSD|OpenBSD" AND CMAKE_CXX_COMPILER_ID
                                                                          MATCHES "GNU|Clang"
 )
-  # --exclude-libs needs exact archive filenames (no globs), so turn each -lLLVM* from llvm-config
-  # into libLLVM*.a and add zlib/zstd. One colon-separated list -- a -Wl comma list would be split.
-  set(_exclude_archives ${_llvm_libs_list} "-lz" "-lzstd")
-  list(TRANSFORM _exclude_archives REPLACE "^-l(.+)$" "lib\\1.a")
-  list(JOIN _exclude_archives ":" _exclude_libs_arg)
-  target_link_options(tvm_ffi_orcjit PRIVATE "-Wl,--exclude-libs=${_exclude_libs_arg}")
+  target_link_options(
+    tvm_ffi_orcjit PRIVATE "LINKER:--exclude-libs,ALL"
+    "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/orcjit.lds"
+  )
+elseif (APPLE)
+  target_link_options(
+    tvm_ffi_orcjit PRIVATE
+    "LINKER:-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/cmake/orcjit.macos.lds"
+  )
 endif ()
 
 # ---- Find and embed liborc_rt (Linux/ELF only) ----
@@ -210,6 +210,55 @@ if (ORC_RT_PATH)
   set_property(
     SOURCE "${CMAKE_CURRENT_BINARY_DIR}/orc_rt_embed.S" PROPERTY OBJECT_DEPENDS "${ORC_RT_PATH}"
   )
+endif ()
+
+# ---- Find and embed libstdc++_nonshared (Linux/ELF only) ----
+#
+# RHEL-family toolchains use a linker script for libstdc++.so that supplements the shared runtime
+# with libstdc++_nonshared.a. Objects compiled by that toolchain can therefore reference helpers
+# that are absent from libstdc++.so.6. The ORC runtime is one such object on manylinux.
+#
+# Discover the archive with the build compiler, bake it into the addon, and attach it to ORC's
+# private ProcessSymbols JITDylib at runtime. This reproduces the compiler driver's link semantics
+# without exporting the helpers from this DSO and without requiring a compiler or archive path on
+# the end user's machine. LIBSTDCXX_NONSHARED_PATH remains an escape hatch for unusual toolchains.
+set(LIBSTDCXX_NONSHARED_PATH
+    ""
+    CACHE FILEPATH "Path to libstdc++_nonshared.a to embed for ORC"
+)
+if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android"
+    AND NOT LIBSTDCXX_NONSHARED_PATH
+    AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
+)
+  execute_process(
+    COMMAND "${CMAKE_CXX_COMPILER}" -print-file-name=libstdc++_nonshared.a
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    OUTPUT_VARIABLE _libstdcxx_nonshared_candidate
+    RESULT_VARIABLE _libstdcxx_nonshared_rc
+  )
+  if (_libstdcxx_nonshared_rc EQUAL 0 AND EXISTS "${_libstdcxx_nonshared_candidate}")
+    set(LIBSTDCXX_NONSHARED_PATH "${_libstdcxx_nonshared_candidate}")
+  endif ()
+endif ()
+
+if (LIBSTDCXX_NONSHARED_PATH)
+  if (NOT EXISTS "${LIBSTDCXX_NONSHARED_PATH}")
+    message(FATAL_ERROR "LIBSTDCXX_NONSHARED_PATH does not exist: ${LIBSTDCXX_NONSHARED_PATH}")
+  endif ()
+  message(STATUS "Embedding libstdc++_nonshared: ${LIBSTDCXX_NONSHARED_PATH}")
+  enable_language(ASM)
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ffi/libstdcxx_nonshared_embed.S.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/libstdcxx_nonshared_embed.S" @ONLY
+  )
+  target_sources(tvm_ffi_orcjit PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/libstdcxx_nonshared_embed.S")
+  target_compile_definitions(tvm_ffi_orcjit PRIVATE TVM_FFI_ORCJIT_EMBED_LIBSTDCXX_NONSHARED=1)
+  set_property(
+    SOURCE "${CMAKE_CURRENT_BINARY_DIR}/libstdcxx_nonshared_embed.S"
+    PROPERTY OBJECT_DEPENDS "${LIBSTDCXX_NONSHARED_PATH}"
+  )
+else ()
+  message(STATUS "libstdc++_nonshared.a not found; using the shared C++ runtime only")
 endif ()
 
 # ---- Install ----

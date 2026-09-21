@@ -24,6 +24,7 @@
 
 #include "orcjit_session.h"
 
+#include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
 #include <llvm/Support/Error.h>
@@ -78,6 +79,12 @@ static LLVMInitializer llvm_initializer;
 extern "C" const char orc_rt_archive_start[];
 extern "C" const char orc_rt_archive_end[];
 #endif
+#ifdef TVM_FFI_ORCJIT_EMBED_LIBSTDCXX_NONSHARED
+// libstdc++_nonshared.a embedded in .rodata by
+// libstdcxx_nonshared_embed.S.in.
+extern "C" const char libstdcxx_nonshared_archive_start[];
+extern "C" const char libstdcxx_nonshared_archive_end[];
+#endif
 
 namespace {
 #ifdef TVM_FFI_ORCJIT_EMBED_ORC_RT
@@ -90,6 +97,16 @@ std::unique_ptr<llvm::MemoryBuffer> GetEmbeddedOrcRuntimeBuffer() {
                       reinterpret_cast<std::uintptr_t>(orc_rt_archive_end) -
                           reinterpret_cast<std::uintptr_t>(orc_rt_archive_start)),
       "liborc_rt.a", /*RequiresNullTerminator=*/false);
+}
+#endif
+
+#ifdef TVM_FFI_ORCJIT_EMBED_LIBSTDCXX_NONSHARED
+std::unique_ptr<llvm::MemoryBuffer> GetEmbeddedLibStdCxxNonsharedBuffer() {
+  return llvm::MemoryBuffer::getMemBuffer(
+      llvm::StringRef(libstdcxx_nonshared_archive_start,
+                      reinterpret_cast<std::uintptr_t>(libstdcxx_nonshared_archive_end) -
+                          reinterpret_cast<std::uintptr_t>(libstdcxx_nonshared_archive_start)),
+      "libstdc++_nonshared.a", /*RequiresNullTerminator=*/false);
 }
 #endif
 
@@ -191,7 +208,23 @@ ORCJITExecutionSessionObj::ORCJITExecutionSessionObj(const Optional<Variant<Stri
           return std::make_unique<llvm::orc::ObjectLinkingLayer>(ES);
         });
 #endif
-#ifdef _WIN32
+#ifdef TVM_FFI_ORCJIT_EMBED_LIBSTDCXX_NONSHARED
+    // Install the archive before platform setup: ExecutorNativePlatform may
+    // materialize liborc_rt while LLJITBuilder::create() is still running.
+    builder.setProcessSymbolsJITDylibSetup(
+        [](llvm::orc::LLJIT& J) -> llvm::Expected<llvm::orc::JITDylibSP> {
+          auto& JD = J.getExecutionSession().createBareJITDylib("<Process Symbols>");
+          auto process_generator = llvm::orc::EPCDynamicLibrarySearchGenerator::GetForTargetProcess(
+              J.getExecutionSession());
+          if (!process_generator) return process_generator.takeError();
+          JD.addGenerator(std::move(*process_generator));
+
+          if (auto err = J.linkStaticLibraryInto(JD, GetEmbeddedLibStdCxxNonsharedBuffer())) {
+            return std::move(err);
+          }
+          return &JD;
+        });
+#elif defined(_WIN32)
     // Override ProcessSymbols setup to NOT add the default
     // EPCDynamicLibrarySearchGenerator. That generator resolves symbols to
     // absolute host-process addresses, which causes PCRel32 overflow when
