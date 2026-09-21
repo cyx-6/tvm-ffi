@@ -29,10 +29,7 @@ Examples
 
 """
 
-import ctypes
-import os
 import platform
-import sys
 from pathlib import Path
 
 from tvm_ffi import load_module
@@ -52,33 +49,22 @@ _LIB_PATH = [
     Path(__file__).parent / "lib" / _LIB_NAME,
     Path(__file__).parent.parent.parent / "build" / _LIB_NAME,
 ]
-_lib_dir = None
+_lib_path = None
 for path in _LIB_PATH:
     if path.exists():
-        _ = load_module(str(path))
-        _lib_dir = path.parent
-if _lib_dir is None:
+        _lib_path = path
+        break
+if _lib_path is None:
     raise RuntimeError(
         f"Could not find {_LIB_NAME}. "
         f"Searched in {_LIB_PATH} and site-packages. "
         f"Please ensure the package is installed correctly."
     )
 
-# Explicitly initialize the library to register functions
-# This is needed because static initializers may not run when loaded via dlopen
-try:
-    # The dll search path need to be added explicitly in windows
-    if sys.platform.startswith("win32"):
-        os.add_dll_directory(str(_lib_dir))
-    # Load the library with ctypes and call the initialization function
-    c_lib = ctypes.CDLL(str(_lib_dir / _LIB_NAME), mode=ctypes.RTLD_GLOBAL)
-    init_func = c_lib.TVMFFIOrcJITInitialize
-    init_func.restype = None
-    init_func()
-except Exception as e:
-    import warnings
-
-    warnings.warn(f"Failed to explicitly initialize orcjit library: {e}")
+# The TVM-FFI loader uses local symbol scope. Retain the returned module here
+# and in TVM-FFI's process-lifetime module registry so registered functions and
+# JIT-owned object deleters remain valid through interpreter shutdown.
+_lib_module = load_module(_lib_path, keep_module_alive=True)
 
 from .session import ExecutionSession, default_session
 
