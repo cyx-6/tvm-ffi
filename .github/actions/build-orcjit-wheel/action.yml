@@ -152,6 +152,8 @@ runs:
         CIBW_TEST_REQUIRES: pytest pytest-xdist ninja
         CIBW_TEST_COMMAND: >-
           pip install --force-reinstall {project} &&
+          python -X faulthandler -m pytest
+          {project}/addons/tvm_ffi_orcjit/tests/test_basic.py::test_create_session -vv -s &&
           pytest {project}/addons/tvm_ffi_orcjit/tests -v &&
           python {project}/addons/tvm_ffi_orcjit/examples/quick-start/run.py --lang cpp &&
           python {project}/addons/tvm_ffi_orcjit/examples/quick-start/run.py --lang c
