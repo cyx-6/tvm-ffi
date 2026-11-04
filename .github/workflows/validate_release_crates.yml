@@ -58,7 +58,7 @@ jobs:
       - name: Check out release source
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.sha }}
+          ref: refs/tags/${{ inputs.tag || 'v0.1.16-rc0' }}
           submodules: recursive
           fetch-depth: 0
           fetch-tags: true
